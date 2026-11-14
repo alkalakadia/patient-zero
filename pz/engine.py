@@ -192,7 +192,7 @@ class Engine:
     # ---------- clean ----------
     def clean(self, verdict, apply=True):
         ts = 10 ** 9
-        reverted, conflicts, checklist, quarantined = [], [], [], []
+        reverted, conflicts, checklist, quarantined, already = [], [], [], [], []
         confirmed = set(verdict["confirmed"])
         for obj in [verdict["root"]] + [m for m in verdict["memories"]
                                         if any(self.event[e]["object_id"] == m for e in confirmed)]:
@@ -229,7 +229,10 @@ class Engine:
                 if before.get(field) == bad or target.get(field) == bad:
                     continue  # field not touched, or the clean replay would have written the same value
                 if current.get(field) != bad:
-                    conflicts.append({"event_id": eid, "row": e["row_key"], "field": field, "current": current.get(field)})
+                    if current.get(field) == target.get(field):
+                        already.append({"event_id": eid, "row": e["row_key"], "field": field, "value": current.get(field)})
+                    else:
+                        conflicts.append({"event_id": eid, "row": e["row_key"], "field": field, "current": current.get(field)})
                     continue
                 if field in target:
                     fixes[field] = target[field]
@@ -249,6 +252,7 @@ class Engine:
         if apply:
             self.s.commit()
         return {"quarantined": quarantined, "reverted": reverted, "conflicts": conflicts, "checklist": checklist,
+                "already_corrected": already,
                 "point_in_time_collateral": later_changes - infected_changes}
 
     # ---------- score ----------

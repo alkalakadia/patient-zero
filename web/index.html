@@ -141,6 +141,11 @@ th{color:var(--muted);font-weight:500;font-family:Inter}
 .card .row{display:flex;gap:8px;margin-top:auto}
 .card .row .btn{padding:10px 12px;font-size:13.5px}
 
+.live{max-width:1120px;margin:0 auto;background:linear-gradient(180deg,#0f2219,#11141b);border:1px solid #1d5a40;border-radius:18px;padding:22px}
+.live h2{margin:6px 0 8px;font-size:24px}
+.live textarea{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;color:#ffe9c7;font:13.5px Inter;margin-top:6px;resize:vertical}
+.links{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.links a{font-size:12.5px;border:1px solid #1d5a40;border-radius:999px;padding:5px 10px;text-decoration:none;color:#8ff0c4}
 #modal{position:fixed;inset:0;background:rgba(5,6,10,.7);display:none;place-items:center;z-index:50;backdrop-filter:blur(4px)}
 #modal.on{display:grid}
 .mbox{width:min(520px,calc(100% - 32px));background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:24px}
@@ -181,6 +186,19 @@ input[type=range]{width:100%;accent-color:var(--red)}
     <h1>When an AI agent gets poisoned, find everything it touched and undo only that.</h1>
     <p>Pick a scenario. Each one is modeled on a real, publicly reported attack on AI agents; the company data is fictional. Watch the business agents work for a week, then hand the alert to Patient Zero and watch it investigate.</p>
   </div>
+  <div class="live" id="liveHero">
+    <div class="kicker" style="color:var(--green)">● Live on Databricks</div>
+    <h2>Real agents. Real data. A real attack.</h2>
+    <p>Three AI agents run accounts payable at Halden Manufacturing on <b>40 real suppliers and order totals from Databricks</b> (samples.tpch), served by <b>Databricks model serving</b>. Every action streams into <b>Delta</b>. You play the attacker: edit the company's payment-policy page, then watch what the agents do and how Patient Zero cleans it up.</p>
+    <label class="muted" style="font-size:12.5px">The payments policy page, after your edit:</label>
+    <textarea id="attackText" rows="3"></textarea>
+    <div class="row" style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
+      <button class="btn green" id="liveReplay" style="flex:1">Watch the recorded live run (no cost)</button>
+      <button class="btn red" id="liveRun" style="flex:1">Run it live now (~3 min)</button>
+    </div>
+    <div class="muted" style="font-size:12px;margin-top:8px" id="liveNote"></div>
+  </div>
+  <div class="pick-head" style="margin-top:30px"><div class="kicker">Practice scenarios (simulated, instant)</div></div>
   <div class="grid" id="cards"></div>
 </div>
 <div id="tip"></div>
@@ -221,9 +239,10 @@ function append(html){ const b = $('#sideBody'); b.insertAdjacentHTML('beforeend
 /* ---------------- scenario picker ---------------- */
 async function showPicker(){
   if (es) es.close();
-  runId++;
+  const my = ++runId;
   setStage(0);
   if (!SC.length) SC = await api('/api/scenarios');
+  if (my !== runId) return;  // something else started while we were loading
   $('#cards').innerHTML = SC.map(s => `<div class="card">
     <div class="co">${esc(s.company)}</div><h3>${esc(s.title)}</h3><div class="muted" style="font-size:13.5px">${esc(s.blurb)}</div>
     <div class="real"><span class="rn">Real incident · ${esc(s.real.when)}</span><b>${esc(s.real.name)}</b><div style="margin-top:4px">${esc(s.real.what)}</div><a href="${s.real.url}" target="_blank" rel="noopener">Source</a></div>
@@ -234,6 +253,7 @@ async function showPicker(){
 }
 
 async function start(id, attack){
+  LIVE = null;
   await api('/api/reset', {scenario:id, ...(attack || {})});
   $('#picker').classList.remove('on');
   [OV, ALERTS, G] = await Promise.all([api('/api/overview'), api('/api/alerts'), api('/api/graph')]);
@@ -384,11 +404,13 @@ function investigate(){
   let lastTool = null;
   const queue = []; let draining = false;
   const drain = async () => { if (draining) return; draining = true; while (queue.length) await handle(queue.shift()); draining = false; };
-  es = new EventSource('/api/investigate?event_ids=' + encodeURIComponent(selected));
+  const url = LIVE && LIVE.replay && LIVE.links && LIVE.links.investigated ? '/api/investigate/replay'
+            : '/api/investigate?event_ids=' + encodeURIComponent(selected) + (LIVE ? '&mode=claude' : '');
+  es = new EventSource(url);
   es.onmessage = m => { queue.push(JSON.parse(m.data)); drain(); };
   es.onerror = () => es.close();
   async function handle(ev){
-    if (ev.type === 'mode'){ $('#mode').textContent = ev.claude ? 'Claude · live' : 'offline · scripted reasoning'; $('#mode').classList.toggle('live', ev.claude); }
+    if (ev.type === 'mode'){ $('#mode').textContent = ev.replay ? 'Claude · recorded run' : ev.claude ? 'Claude · live' : 'offline · scripted reasoning'; $('#mode').classList.toggle('live', ev.claude); }
     if (ev.type === 'status') $('#pzs').textContent = 'Incident-response agent · ' + ev.text.toLowerCase();
     if (ev.type === 'thought') append(`<div class="ev thought fade"><div class="dot">PZ</div><div class="txt">${esc(ev.text)}</div></div>`);
     if (ev.type === 'tool_call') lastTool = append(`<div class="ev tool fade"><div class="h"><span>${esc(ev.name)}</span><span class="muted" style="font-family:Inter;font-weight:500">${esc(TOOL_LABEL[ev.name] || '')}</span><span class="st"><span class="spin"></span></span></div><div class="b"></div></div>`);
@@ -413,10 +435,15 @@ function toolBody(ev){
       + s.candidates.map(c => kv(`hide ${c.id} (${c.source}) and replay`, c.removing_it_changes_outcome ? 'outcome changes' : 'no effect')).join('')
       + (root ? `<div class="evidence"><span class="tag">UNTRUSTED EVIDENCE · NOT FOLLOWED</span>${esc(root.text_UNTRUSTED)}</div>` : '');
   }
-  if (ev.name === 'trace_forward') return kv('sessions exposed', s.sessions_exposed) + kv('agents reached', s.agents_reached.length) + kv('memories contaminated', s.memories_contaminated.join(', ') || 'none') + kv('suspect actions', s.suspect_actions);
+  if (ev.name === 'find_lookalikes') return s.status ? `<div class="muted">${esc(s.status)}</div>` : (s.similar_items.length ? s.similar_items.map(h => kv(`${h.id} (${h.source}, run ${h.run})`, h.kind)).join('') : 'no reworded copies found');
+  if (ev.name === 'trace_forward') return (s.databricks_sql_agrees !== undefined ? `<div class="good" style="margin-bottom:4px">${s.databricks_sql_agrees ? '✓ Same result from a recursive SQL query over the Delta edges table' : '⚠ Databricks SQL disagrees'}</div>` : '') + kv('sessions exposed', s.sessions_exposed) + kv('agents reached', s.agents_reached.length) + kv('memories contaminated', s.memories_contaminated.join(', ') || 'none') + kv('suspect actions', s.suspect_actions);
   if (ev.name === 'replay_sessions') return kv('caused by the poison', s.proven_caused_by_poison) + kv('cleared by replay', s.cleared_by_replay) + (s.examples_proven[0] ? `<div style="margin-top:6px">e.g. <span style="color:#ffb3bb">${esc(s.examples_proven[0])}</span></div>` : '');
-  if (ev.name === 'plan_cleanup') return kv('quarantine', s.quarantine.join(', ')) + kv('rows to fix', s.rows_to_fix) + kv('irreversible, for a human', s.irreversible_for_human_checklist) + kv('legit changes a restore would destroy', s.legit_changes_a_point_in_time_restore_would_destroy);
-  if (ev.name === 'apply_cleanup') return kv('rows fixed', s.rows_fixed) + kv('quarantined', s.quarantined.join(', '));
+  if (ev.name === 'plan_cleanup') return kv('quarantine', s.quarantine.join(', ')) + kv('rows to fix', s.rows_to_fix) + (s.already_corrected_by_a_later_change ? kv('already corrected by a later change', s.already_corrected_by_a_later_change) : '') + kv('irreversible, for a human', s.irreversible_for_human_checklist) + kv('legit changes a restore would destroy', s.legit_changes_a_point_in_time_restore_would_destroy);
+  if (ev.name === 'apply_cleanup'){
+    const d = ev.data && ev.data.delta;
+    return kv('rows fixed', s.rows_fixed) + kv('quarantined (old policy restored)', s.quarantined.join(', '))
+      + (d ? `<div class="good" style="margin-top:6px">Applied in Delta · change data feed rows: ${d.changes.length}</div>` + d.changes.slice(0,6).map(c => kv(`${c.item_id} ${c._change_type.replace('update_','')}`, c.value)).join('') + (d.link ? `<a href="${d.link}" target="_blank">open payments table in Databricks</a>` : '') : '');
+  }
   if (ev.name === 'request_approval') return kv('approved', s.approved);
   return '';
 }
@@ -456,10 +483,15 @@ async function animateTool(ev){
 }
 
 function approval(ev){
-  const s = ev.summary;
+  const s = typeof ev.summary === 'object' && ev.summary ? ev.summary : {};
+  s.quarantine = s.quarantine || []; s.rows_to_fix = s.rows_to_fix || 0;
+  s.irreversible_for_human_checklist = s.irreversible_for_human_checklist || 0;
+  s.legit_changes_a_point_in_time_restore_would_destroy = s.legit_changes_a_point_in_time_restore_would_destroy || 0;
   const rows = ev.rows.slice(0,5).map(r => r.deleted ? `<tr><td>${esc(r.row)}</td><td colspan="2">remove</td></tr>` : `<tr><td>${esc(r.row)}</td><td><span class="strike">${esc(r.was)}</span> → <span class="good">${esc(r.now)}</span></td><td>${esc(r.kept)}</td></tr>`).join('');
   append(`<div class="approval fade"><h3>Approve the cleanup?</h3>
     <p style="font-size:13.5px">Patient Zero won't change anything without a person signing off.</p>
+    ${ev.note ? `<div class="callout" style="border-color:var(--amber)">${esc(ev.note)}</div>` : ''}
+    ${s.already_corrected_by_a_later_change ? `<p style="font-size:13px" class="muted">${s.already_corrected_by_a_later_change} rows were already corrected by a later change (the Treasury agent), so they are left as they are.</p>` : ''}
     <div class="metrics"><div class="metric"><div class="v">${s.rows_to_fix}</div><div class="l">rows to fix, field by field</div></div><div class="metric"><div class="v">${s.quarantine.length}</div><div class="l">to quarantine</div></div>
       <div class="metric"><div class="v" style="color:var(--amber)">${s.irreversible_for_human_checklist}</div><div class="l">already sent: human checklist</div></div><div class="metric"><div class="v" style="color:var(--green)">0</div><div class="l">legit changes lost (a restore: ${s.legit_changes_a_point_in_time_restore_would_destroy})</div></div></div>
     <table><thead><tr><th>Row</th><th>${esc(OV.field)}</th><th>Kept</th></tr></thead><tbody>${rows}</tbody></table>
@@ -474,11 +506,14 @@ function showReport(r){
   const sp = r.spread || {};
   append(`<div class="report fade"><div class="kicker" style="color:var(--green)">Incident report</div>
     <h1 style="font-size:19px">${esc(r.title)}</h1>
-    ${r.approved ? `<div class="big">${esc(r.amount_corrected)}</div><div class="muted" style="font-size:13px;margin-bottom:8px">in ${esc(OV.item)}s corrected</div>` : '<p>Cleanup was declined. Nothing was changed.</p>'}
+    ${!r.approved ? '<p>Cleanup was declined. Nothing was changed.</p>'
+      : r.fixed ? `<div class="big">${esc(r.amount_corrected)}</div><div class="muted" style="font-size:13px;margin-bottom:8px">in ${esc(OV.item)}s corrected</div>`
+      : `<div class="big" style="font-size:24px">${esc(r.root)} quarantined</div><div class="muted" style="font-size:13px;margin-bottom:8px">The poisoned policy is gone and the original is restored. Every payment it touched had already been reversed by a later change, so no rows needed fixing; the messages that went out are on the human checklist.</div>`}
     <div class="chain">Source: ${r.chain.map(esc).join(' ← ')}</div>
     <div class="metrics"><div class="metric"><div class="v">${(sp.agents_reached || []).length}</div><div class="l">agents reached</div></div><div class="metric"><div class="v">${r.proven}</div><div class="l">actions caused by the poison</div></div>
       <div class="metric"><div class="v">${r.cleared}</div><div class="l">cleared, left alone</div></div><div class="metric"><div class="v">${r.checklist}</div><div class="l">for a human to follow up</div></div></div>
-    ${r.score ? `<div class="callout green">Checked against the attack we planted: ${Math.round(r.score.precision*100)}% precision, ${Math.round(r.score.recall*100)}% recall.</div>` : ''}
+    ${r.score ? `<div class="callout green">${LIVE ? 'Checked against every action that carried the attacker\'s account' : 'Checked against the attack we planted'}: ${Math.round(r.score.precision*100)}% precision, ${Math.round(r.score.recall*100)}% recall.</div>` : ''}
+    ${LIVE && LIVE.links ? `<div class="links">${LIVE.links.payments ? `<a href="${LIVE.links.payments}" target="_blank">Delta: payments + change feed</a>` : ''}${LIVE.links.mlflow ? `<a href="${LIVE.links.mlflow}" target="_blank">MLflow: runs + agent traces</a>` : ''}${LIVE.links.dashboard ? `<a href="${LIVE.links.dashboard}" target="_blank">AI/BI incident dashboard</a>` : ''}</div>` : ''}
   </div>`);
   foot(`<button class="btn line" id="again">Try another scenario</button><button class="btn red" id="dl">Download report</button>`);
   $('#again').onclick = showPicker;
@@ -512,6 +547,70 @@ $('#mRun').onclick = async () => {
 };
 $('#toPicker').onclick = showPicker;
 
+/* ---------------- live mode ---------------- */
+let LIVE = null;  // {replay: bool}
+async function initLive(){
+  const d = await api('/api/live/defaults');
+  $('#attackText').value = d.attack_template;
+  const runs = await api('/api/live/runs');
+  const rec = runs.find(r => r.investigated) || runs[0];
+  $('#liveReplay').disabled = !rec; $('#liveReplay').dataset.run = rec ? rec.run_id : '';
+  $('#liveNote').textContent = (d.databricks ? 'Databricks connected. ' : 'Databricks not configured. ') +
+    (rec ? `Recorded run ${rec.run_id}: ${rec.poisoned} poisoned actions, agents on ${rec.model}.` : 'No recorded run yet.') +
+    ' Live: business agents are free on Databricks; Patient Zero uses Claude (about 2¢).';
+}
+$('#liveReplay').onclick = async () => { await api('/api/live/load', {run_id: $('#liveReplay').dataset.run}); startLive(true); };
+$('#liveRun').onclick = async () => {
+  try { await api('/api/live/start', {attack_text: $('#attackText').value}); startLive(false); }
+  catch(e){ $('#liveNote').textContent = e.message; }
+};
+
+async function startLive(replay){
+  LIVE = {replay}; const my = ++runId;
+  $('#picker').classList.remove('on'); setStage(1); verdict = null;
+  if (cy){ cy.destroy(); cy = null; }
+  $('#legend').innerHTML = ''; hint(replay ? 'Recorded live run · replaying' : 'Live run · real agents working');
+  head(`<div class="av" style="background:var(--green);color:#06291b">H</div><div><div class="t">Halden Manufacturing · live</div><div class="s">Real agents on Databricks model serving · real TPC-H suppliers</div></div><span class="chip live">${replay ? 'recorded' : 'live'}</span>`);
+  body(`<div class="kicker" style="color:var(--green)">The week, as it happens</div><h1>Agents at work</h1><div class="feed" id="lfeed"></div>`);
+  foot(replay ? '<button class="btn line" id="faster">Speed up</button>' : '');
+  let speed = 6;
+  if (replay) $('#faster').onclick = () => { speed = 20; foot(''); };
+  const names = {ap_agent:'AP assistant', treasury_agent:'Treasury agent', vendor_agent:'Vendor-relations agent', system:'Nightly job'};
+  const colors = {ap_agent:ROLE_COLOR.primary, treasury_agent:ROLE_COLOR.reviewer, vendor_agent:ROLE_COLOR.notifier};
+  const feed = html => { const f = $('#lfeed'); f.insertAdjacentHTML('beforeend', html); $('#sideBody').scrollTo({top:$('#sideBody').scrollHeight}); };
+  const res = await fetch('/api/live/stream?speed=' + speed);
+  const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '';
+  const attacker = [];
+  while (true){
+    const {value, done} = await reader.read(); if (done) break;
+    if (my !== runId){ reader.cancel(); return; }  // a newer run took over
+    buf += dec.decode(value, {stream:true});
+    let i; while ((i = buf.indexOf('\n\n')) >= 0){
+      const line = buf.slice(0, i); buf = buf.slice(i + 2);
+      if (!line.startsWith('data:')) continue;
+      const e = JSON.parse(line.slice(5));
+      if (e.type === 'phase') feed(`<div style="border-left-color:var(--green)">${esc(e.text)}${e.link ? ` · <a href="${e.link}" target="_blank">open in Databricks</a>` : ''}</div>`);
+      if (e.type === 'attack'){ attacker.push(1); feed(`<div class="evidence" style="margin:4px 0"><span class="tag">DAY ${e.day} · SOMEONE EDITED THE PAYMENTS POLICY PAGE</span>${esc(e.text)}</div>`); }
+      if (e.type === 'session_start' && e.agent !== 'system') feed(`<div style="border-left-color:${colors[e.agent] || '#555'}"><b>${esc(names[e.agent] || e.agent)}</b> · day ${e.day}: ${esc(e.task)}</div>`);
+      if (e.type === 'tool'){
+        const bad = JSON.stringify(e.args).includes('BANK-99') ? ';color:#ff8a96;border-left-color:var(--red)' : '';
+        const a = e.tool === 'create_item' || e.tool === 'change_value' ? (e.args.value || '') : e.tool === 'send_message' ? '“' + (e.args.body || '').slice(0, 90) + '…”' : e.tool === 'save_team_note' ? '“' + (e.args.text || '').slice(0, 90) + '”' : (e.args.item_id || e.args.id || '');
+        feed(`<div style="margin-left:14px;font-family:var(--mono);font-size:12px${bad}">→ ${esc(e.tool)} ${esc(a)} <span class="muted">${esc(typeof e.result === 'string' ? e.result.slice(0, 40) : Array.isArray(e.result) ? e.result.length + ' items' : '')}</span></div>`);
+      }
+      if (e.type === 'mlflow') feed(`<div style="border-left-color:var(--green)">Logged to MLflow · <a href="${e.url}" target="_blank">open experiment</a></div>`);
+      if (e.type === 'error') feed(`<div class="callout">${esc(e.text)}</div>`);
+    }
+  }
+  [OV, ALERTS, G] = await Promise.all([api('/api/overview'), api('/api/alerts'), api('/api/graph')]);
+  OV = {...OV, agents: {primary:['ap_agent','AP assistant','Schedules invoice payments'], reviewer:['treasury_agent','Treasury agent','Reviews the payment run'], notifier:['vendor_agent','Vendor-relations agent','Sends remittance advice']}, company:'Halden Manufacturing'};
+  LIVE.links = await api('/api/live/links');
+  selected = (ALERTS[0] || {}).event_id;
+  buildGraph(); cy.elements().removeClass('hidden'); cy.fit(undefined, 30);
+  if (!ALERTS.length){ body('<h1>No alerts</h1><p>No payment went to an account outside the vendor master this time.</p>'); return; }
+  showAlerts();
+}
+
+initLive();
 showPicker();
 </script>
 </body>

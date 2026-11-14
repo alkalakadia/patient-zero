@@ -76,6 +76,8 @@ class Delta:
                  "created_ts BIGINT, status STRING, text STRING)")
         self.sql(f"CREATE OR REPLACE TABLE {SCHEMA}.payments (item_id STRING, entity_id STRING, category STRING, amount DOUBLE, "
                  "value STRING, status STRING) TBLPROPERTIES (delta.enableChangeDataFeed = true)")
+        self.sql(f"CREATE TABLE IF NOT EXISTS {SCHEMA}.edges (run_id STRING, src STRING, dst STRING, type STRING, ts BIGINT)")
+        self.versions = []  # (session ts, payments table version after that session) -> time travel for replays
         self.sql(f"CREATE TABLE IF NOT EXISTS {SCHEMA}.incidents (run_id STRING, root STRING, proven INT, cleared INT, rows_fixed INT, "
                  "created_at TIMESTAMP)")
         self.base_version = self.sql(f"DESCRIBE HISTORY {SCHEMA}.payments LIMIT 1")[0]["version"]
@@ -94,7 +96,8 @@ class Delta:
         events = store.q("SELECT * FROM events WHERE session_id=?", (session_id,))
         changes = store.q("SELECT * FROM row_changes WHERE session_id=? AND table_name='items' ORDER BY version", (session_id,))
         kb = store.q("SELECT * FROM kb WHERE created_by_session=?", (session_id,))
-        self.q.put(("session", events, changes, kb))
+        ts = store.one("SELECT ts FROM sessions WHERE session_id=?", (session_id,))["ts"]
+        self.q.put(("session", events, changes, (kb, ts)))
 
     def push_kb(self, store):
         self.q.put(("kb", store.q("SELECT * FROM kb"), None, None))
@@ -112,13 +115,21 @@ class Delta:
                     a.set()
                 elif kind == "kb":
                     self._insert("knowledge", [(self.run_id, r["object_id"], r["kind"], r["source"], r["created_ts"], r["status"], r["text"]) for r in a])
+                    self._insert("kb_vectors", [(f"{self.run_id}:{r['object_id']}", self.run_id, r["object_id"], r["kind"], r["source"], r["text"]) for r in a])
                 else:
                     self._insert("agent_events", [(self.run_id, e["event_id"], e["session_id"], e["agent_id"], e["ts"], e["type"], e["object_id"],
                                                    e["tool"], e["row_key"], bool(e["reversible"]), e["payload"]) for e in a])
+                    kb, ts = c
                     for ch in b:
                         self._apply_change(ch)
-                    if c:
-                        self._insert("knowledge", [(self.run_id, r["object_id"], r["kind"], r["source"], r["created_ts"], r["status"], r["text"]) for r in c])
+                    if kb:
+                        self._insert("knowledge", [(self.run_id, r["object_id"], r["kind"], r["source"], r["created_ts"], r["status"], r["text"]) for r in kb])
+                        self._insert("kb_vectors", [(f"{self.run_id}:{r['object_id']}", self.run_id, r["object_id"], r["kind"], r["source"], r["text"]) for r in kb])
+                    edges = [(self.run_id, e["object_id"], e["session_id"], "read", e["ts"]) for e in a if e["type"] == "retrieve"]
+                    edges += [(self.run_id, e["session_id"], e["object_id"], "wrote", e["ts"]) for e in a if e["type"] in ("memory_write", "kb_ingest")]
+                    self._insert("edges", edges)
+                    if b:
+                        self.versions.append((ts, self.sql(f"DESCRIBE HISTORY {SCHEMA}.payments LIMIT 1")[0]["version"]))
             except Exception as ex:  # keep the demo running; surface errors in /api/databricks
                 self.errors.append(str(ex)[:300])
 
@@ -144,6 +155,59 @@ class Delta:
         elif ch["op"] == "delete":
             self.sql(f"DELETE FROM {SCHEMA}.payments WHERE item_id=:i", {"i": ch["row_key"]})
 
+    # ---------- trace in Databricks SQL ----------
+    FORWARD_SQL = f"""
+WITH RECURSIVE reach(node, depth) AS (
+  SELECT :root, 0
+  UNION ALL
+  SELECT e.dst, r.depth + 1 FROM {SCHEMA}.edges e JOIN reach r ON e.src = r.node
+  WHERE e.run_id = :run AND r.depth < 12
+)
+SELECT DISTINCT node FROM reach WHERE node <> :root"""
+
+    def trace_forward_sql(self, root):
+        """Everything reachable from the source: sessions that read it, memories they wrote, sessions that read those."""
+        self.flush()
+        nodes = {r["node"] for r in self.sql(self.FORWARD_SQL, {"root": root, "run": self.run_id})}
+        return {"query": self.FORWARD_SQL.strip(), "sessions": sorted(n for n in nodes if n.startswith("s")),
+                "memories": sorted(n for n in nodes if not n.startswith("s"))}
+
+    # ---------- vector search: look-alikes of the poison ----------
+    INDEX = f"{SCHEMA}.kb_index"
+
+    def find_similar(self, text, exclude=(), k=6, wait=20):
+        """Semantic search over every knowledge doc and memory (this run and past runs) for look-alikes of the poison."""
+        import time
+        from databricks.sdk import WorkspaceClient
+        self.flush()
+        w = WorkspaceClient(host="https://" + self.host, token=os.environ["DATABRICKS_TOKEN"])
+        if not w.vector_search_indexes.get_index(self.INDEX).status.ready:
+            raise RuntimeError("Vector Search index is still provisioning on this workspace")
+        try:
+            w.vector_search_indexes.sync_index(index_name=self.INDEX)
+        except Exception:
+            pass  # a sync may already be running
+        expected = self.sql(f"SELECT count(*) AS n FROM {SCHEMA}.kb_vectors")[0]["n"]
+        deadline = time.time() + wait
+        while time.time() < deadline:  # wait until every document and memory is embedded
+            st = w.vector_search_indexes.get_index(self.INDEX).status
+            if st and st.ready and (st.indexed_row_count or 0) >= expected:
+                break
+            time.sleep(5)
+        res = w.vector_search_indexes.query_index(index_name=self.INDEX, columns=["key", "run_id", "object_id", "kind", "source", "text"],
+                                                  query_text=text, num_results=k + len(exclude))
+        cols = [c.name for c in res.manifest.columns]
+        rows = [dict(zip(cols, r)) for r in (res.result.data_array or [])]
+        return [r for r in rows if r["key"] not in exclude][:k]
+
+    # ---------- time travel ----------
+    def items_as_of(self, ts):
+        """The payments table as it was just before `ts`, read with Delta time travel."""
+        v = max([ver for t, ver in self.versions if t < ts], default=self.base_version)
+        self.tt_versions = getattr(self, "tt_versions", set()) | {v}
+        rows = self.sql(f"SELECT * FROM {SCHEMA}.payments VERSION AS OF {v}")
+        return v, {r["item_id"]: {**r, "amount": float(r["amount"])} for r in rows}
+
     # ---------- cleanup in Delta ----------
     def apply_cleanup(self, reverted, incident):
         """Field-level revert in Delta, then return the before/after images Delta recorded for it."""
@@ -158,8 +222,9 @@ class Delta:
                          {**fixes, "item_id": r["row"]})
         self.sql(f"INSERT INTO {SCHEMA}.incidents VALUES (:r,:root,:p,:c,:f,current_timestamp())",
                  {"r": self.run_id, "root": incident["root"], "p": incident["proven"], "c": incident["cleared"], "f": len(reverted)})
+        latest = self.sql(f"DESCRIBE HISTORY {SCHEMA}.payments LIMIT 1")[0]["version"]
         cdf = self.sql(f"SELECT item_id, value, status, _change_type, _commit_version FROM table_changes('{SCHEMA}.payments', {start}) "
-                       "ORDER BY _commit_version, item_id")
+                       "ORDER BY _commit_version, item_id") if latest >= start else []
         return {"from_version": start, "changes": cdf}
 
     def table_link(self, table="payments"):

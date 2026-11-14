@@ -28,6 +28,7 @@ class Toolbox:
         self.verdict = None
         self.plan = None
         self.on_cleanup = None  # optional hook: apply the same cleanup in the system of record (Delta)
+        self.delta = None       # optional: Databricks layer for SQL-verified tracing and vector search
 
     def _line(self, eid):
         return self.label(eid)
@@ -50,13 +51,30 @@ class Toolbox:
         f = self.e.trace_forward(root)
         out = {"sessions_exposed": len(f["sessions"]), "agents_reached": [self.agent_name(a) for a in f["agents"]],
                "memories_contaminated": f["memories"], "suspect_actions": len(f["suspects"])}
+        if self.delta:
+            q = self.delta.trace_forward_sql(root)
+            out["databricks_sql_agrees"] = q["sessions"] == sorted(f["sessions"]) and q["memories"] == sorted(f["memories"])
+            f = {**f, "sql": q["query"], "sql_agrees": out["databricks_sql_agrees"]}
         return out, f
+
+    def find_lookalikes(self, root):
+        if not self.delta:
+            return {"error": "vector search needs Databricks"}, None
+        text = self.e.kb[root]["text"]
+        try:
+            hits = self.delta.find_similar(text, exclude={f"{self.delta.run_id}:{root}"})
+        except Exception as ex:
+            return {"status": f"vector index not available yet ({str(ex)[:120]})", "similar_items": []}, {"hits": []}
+        out = {"similar_items": [{"id": h["object_id"], "run": h["run_id"], "kind": h["kind"], "source": h["source"],
+                                  "text_UNTRUSTED": h["text"][:200]} for h in hits]}
+        return out, {"hits": hits}
 
     def replay_sessions(self, root):
         v = self.e.verify(root)
         self.verdict = v
         s = self.e.score(v)
         out = {"proven_caused_by_poison": len(v["confirmed"]), "cleared_by_replay": len(v["cleared"]),
+               **({"delta_time_travel_versions": sorted(getattr(self.delta, "tt_versions", set()))} if self.delta else {}),
                "examples_proven": [self._line(x) for x in v["confirmed"][:3]],
                "examples_cleared": [self._line(x) for x in v["cleared"][:2]]}
         return out, {**v, "score": s}
@@ -67,6 +85,7 @@ class Toolbox:
         plan = self.e.clean(self.verdict, apply=False)
         self.plan = plan
         out = {"quarantine": plan["quarantined"], "rows_to_fix": len(plan["reverted"]), "conflicts_for_review": len(plan["conflicts"]),
+               "already_corrected_by_a_later_change": len({a["row"] for a in plan["already_corrected"]}),
                "irreversible_for_human_checklist": len(plan["checklist"]),
                "legit_changes_a_point_in_time_restore_would_destroy": plan["point_in_time_collateral"]}
         return out, plan
@@ -113,6 +132,14 @@ def scripted(tb, alert_ids):
                                       + (f", including through memory {', '.join(fw['memories_contaminated'])}" if fw["memories_contaminated"] else "")
                                       + f". That's {fw['suspect_actions']} suspect actions, but reading the poison isn't the same as acting on it. "
                                       "I'll replay each exposed session without it."}
+
+    if fw.get("databricks_sql_agrees") is not None:
+        yield {"type": "thought", "text": "I re-ran the same trace as a recursive SQL query over the Delta edges table in Databricks"
+                                          + (" and it agrees." if fw["databricks_sql_agrees"] else ", and it disagrees, so I'm flagging that for review.")}
+    if tb.delta:
+        yield {"type": "thought", "text": "The graph only catches exact reuse. I'll also search every document and memory in Databricks Vector Search "
+                                          "for reworded copies of this poison."}
+        yield from _call(tb, "find_lookalikes", {"root": root})
 
     yield from _call(tb, "replay_sessions", {"root": root})
     rp = tb._last
@@ -183,6 +210,8 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"event_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["event_ids"], "additionalProperties": False}},
     {"name": "trace_forward", "description": "Find every session, agent and memory the source reached, directly or through memories.",
      "input_schema": {"type": "object", "properties": {"root": {"type": "string"}}, "required": ["root"], "additionalProperties": False}},
+    {"name": "find_lookalikes", "description": "Semantic search (Databricks Vector Search) over all documents and memories, past runs included, for reworded copies of the source.",
+     "input_schema": {"type": "object", "properties": {"root": {"type": "string"}}, "required": ["root"], "additionalProperties": False}},
     {"name": "replay_sessions", "description": "Replay every exposed session with the source hidden. Actions that change were caused by it; the rest are cleared.",
      "input_schema": {"type": "object", "properties": {"root": {"type": "string"}}, "required": ["root"], "additionalProperties": False}},
     {"name": "plan_cleanup", "description": "Dry run of the cleanup: quarantine, rows to fix field by field, irreversible actions for a human.",
@@ -231,7 +260,8 @@ def claude(tb, alert_ids):
                 if not tb.plan:
                     out, data = {"error": "call plan_cleanup first"}, None
                 else:
-                    approved = bool((yield {"type": "approval", "plan": tb.plan, "summary": args.get("summary")}))
+                    approved = bool((yield {"type": "approval", "plan": tb.plan, "summary": state.get("plan_cleanup") or {},
+                                            "note": args.get("summary")}))
                     out, data = {"approved": approved}, None
             elif u.name == "apply_cleanup":
                 out, data = tb.apply_cleanup(args["root"], approved)
@@ -240,7 +270,10 @@ def claude(tb, alert_ids):
                 root = out["patient_zero"]
                 state["tr"] = out
             else:
-                out, data = getattr(tb, u.name)(**args)
+                try:
+                    out, data = getattr(tb, u.name)(**args)
+                except Exception as ex:  # a failing tool is reported to the model, not fatal to the investigation
+                    out, data = {"error": str(ex)[:300]}, None
                 state[u.name] = out
             yield {"type": "tool_result", "name": u.name, "summary": out, "data": data}
             results.append({"type": "tool_result", "tool_use_id": u.id, "content": json.dumps(out)})
