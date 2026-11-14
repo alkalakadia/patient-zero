@@ -55,21 +55,23 @@ CREATE TABLE IF NOT EXISTS row_changes (
   event_id TEXT,
   ts INTEGER
 );
-CREATE TABLE IF NOT EXISTS refunds (
-  refund_id TEXT PRIMARY KEY, customer_id TEXT, amount REAL, account TEXT, status TEXT
+-- business tables; scenario skins give them display names (refunds, vendor payments, pull requests, quotes)
+CREATE TABLE IF NOT EXISTS items (
+  item_id TEXT PRIMARY KEY, entity_id TEXT, category TEXT, amount REAL, value TEXT, status TEXT
 );
-CREATE TABLE IF NOT EXISTS customers (
-  customer_id TEXT PRIMARY KEY, name TEXT, email TEXT, tier TEXT, account TEXT
+CREATE TABLE IF NOT EXISTS entities (
+  entity_id TEXT PRIMARY KEY, name TEXT, email TEXT, tier TEXT, value TEXT
 );
-CREATE TABLE IF NOT EXISTS emails (
-  email_id TEXT PRIMARY KEY, to_addr TEXT, subject TEXT, body TEXT
+CREATE TABLE IF NOT EXISTS messages (
+  msg_id TEXT PRIMARY KEY, to_addr TEXT, subject TEXT, body TEXT
 );
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS ground_truth (
   event_id TEXT PRIMARY KEY, poisoned INTEGER
 );
 """
 
-BUSINESS_TABLES = {"refunds": "refund_id", "customers": "customer_id", "emails": "email_id"}
+BUSINESS_TABLES = {"items": "item_id", "entities": "entity_id", "messages": "msg_id"}
 
 
 class Store:

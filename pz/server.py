@@ -1,133 +1,275 @@
-"""API + UI.  Run: ./.venv/bin/uvicorn pz.server:app --reload --port 8100"""
+"""API + UI.  Run: ./.venv/bin/uvicorn pz.server:app --port 8100"""
+import asyncio
 import json
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import investigator
 from .engine import Engine
-from .sim import build
-from .store import Store, DB_PATH
+from .scenarios import DEFAULT, SCENARIOS, fmt_amount
+from .sim import attack_defaults, build
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="Patient Zero")
 state = {}
 
 
-def load(fresh=False):
-    store = build() if fresh or not DB_PATH.exists() else Store()
+def load(scenario=DEFAULT, attack=None):
+    sc = SCENARIOS[scenario]
+    store = build(scenario=scenario, attack=attack)
     state.clear()
-    state.update(store=store, engine=Engine(store), verdict=None, cleaned=None)
+    state.update(store=store, engine=Engine(store), scenario=scenario, sc=sc,
+                 attack={**attack_defaults(sc), **(attack or {})}, verdict=None, approval=None)
 
 
-load(fresh=True)
+load()
 
 
-class TraceReq(BaseModel):
-    event_ids: list[str]
+def agent_name(agent_id):
+    for _role, (aid, name, _d) in state["sc"]["agents"].items():
+        if aid == agent_id:
+            return name
+    return {"system": "Nightly job", "intake": "Intake pipeline"}.get(agent_id, agent_id)
 
 
-class RootReq(BaseModel):
-    root: str
+def describe(tool, row, p):
+    sc, T = state["sc"], state["sc"]["texts"]
+    amt = fmt_amount(sc, p["amount"]) if "amount" in p else ""
+    if tool == "create_item":
+        return T["primary"].format(row=row, amount=amt, value=p["value"])
+    if tool == "change_value":
+        return T["reroute"].format(row=row, value=p["value"])
+    if tool == "approve":
+        return T["approve"].format(row=row)
+    if tool == "finalize":
+        return T["final"].format(row=row)
+    if tool == "upgrade":
+        return T["upgrade"].format(row=row, tier=p["tier"])
+    if tool == "send_message":
+        return f"Messaged {p['to_addr']}: “{p['body']}”"
+    if tool == "save_memory":
+        return f"Saved a team memory: “{p.get('text', '')}”"
+    return f"{tool} {row}"
+
+
+def label(n):
+    """Plain-English label for any node id (event, kb object, session)."""
+    eng = state["engine"]
+    if n in eng.event:
+        e = eng.event[n]
+        return describe(e["tool"] or "save_memory", e["row_key"], json.loads(e["payload"]))
+    if n in eng.kb:
+        k = eng.kb[n]
+        if k["source"] not in ("internal", "agent"):
+            return f"{n}, a {k['kind']} from {'an' if k['source'][0] in 'aeiou' else 'a'} {k['source']}"
+        return f"{'Team memory' if k['kind'] == 'memory' else 'Doc'} {n}"
+    sess = state["store"].one("SELECT * FROM sessions WHERE session_id=?", (n,))
+    return f"{agent_name(sess['agent_id'])}, day {sess['ts'] // 1000}" if sess else n
+
+
+# ---------------- scenario + simulation ----------------
+
+class ResetReq(BaseModel):
+    scenario: str = DEFAULT
+    threshold: int | None = None
+    value: str | None = None
+    category: str | None = None
+    worm: bool | None = None
+    day: int | None = None
+
+
+@app.get("/api/scenarios")
+def scenarios():
+    return [{"id": k, "title": s["title"], "short": s["short"], "company": s["company"], "blurb": s["blurb"], "real": s["real"],
+             "agents": s["agents"], "defaults": attack_defaults(s), "categories": s["categories"], "unit": s["unit"],
+             "field": s["field"], "item": s["item"], "entity": s["entity"], "poison_label": s["poison"]["label"]}
+            for k, s in SCENARIOS.items()]
 
 
 @app.post("/api/reset")
-def reset():
-    load(fresh=True)
-    return {"ok": True}
+def reset(req: ResetReq):
+    if req.scenario not in SCENARIOS:
+        raise HTTPException(400, "unknown scenario")
+    sc = SCENARIOS[req.scenario]
+    a = {k: v for k, v in req.model_dump().items() if k != "scenario" and v is not None}
+    if "value" in a and not re.fullmatch(sc["value_re"], a["value"]):
+        raise HTTPException(400, f"value should look like {sc['attacker_value']}")
+    if "category" in a and a["category"] not in sc["categories"]:
+        raise HTTPException(400, "unknown category")
+    if "day" in a and not 1 <= a["day"] <= 6:
+        raise HTTPException(400, "day must be 1-6")
+    load(req.scenario, a or None)
+    owned = {r["value"] for r in state["store"].q("SELECT value FROM entities")}
+    if state["attack"]["value"] in owned:
+        load(req.scenario)
+        raise HTTPException(400, f"that {sc['field']} belongs to a real {sc['entity']}; pick an attacker value")
+    return {"ok": True, "scenario": req.scenario, "attack": state["attack"]}
 
 
 @app.get("/api/overview")
 def overview():
-    s = state["store"]
+    s, sc = state["store"], state["sc"]
+    p = s.one("SELECT * FROM kb WHERE object_id IN ('D-7','M-7')")
     return {
+        "scenario": state["scenario"], "title": sc["title"], "company": sc["company"], "blurb": sc["blurb"], "real": sc["real"],
+        "agents": sc["agents"], "item": sc["item"], "entity": sc["entity"], "field": sc["field"],
         "sessions": s.one("SELECT COUNT(*) n FROM sessions")["n"],
         "actions": s.one("SELECT COUNT(*) n FROM events WHERE type IN ('tool_call','memory_write')")["n"],
-        "agents": [r["agent_id"] for r in s.q("SELECT DISTINCT agent_id FROM sessions ORDER BY agent_id")],
-        "kb": s.q("SELECT object_id, kind, topic, source, status, text FROM kb ORDER BY created_ts"),
+        "attack": state["attack"], "poison": {**p, "label": sc["poison"]["label"]},
+        "claude": investigator.claude_available(),
     }
 
 
 @app.get("/api/alerts")
 def alerts():
-    """A plain detection rule produces the symptom: payouts going to an account no customer owns."""
+    """A plain detection rule produces the symptom: a sensitive value no known entity owns."""
     s = state["store"]
-    owned = {r["account"] for r in s.q("SELECT account FROM customers")}
+    owned = {r["value"] for r in s.q("SELECT value FROM entities")}
     out = []
-    for e in s.q("SELECT * FROM events WHERE tool IN ('issue_refund','reroute_payout') ORDER BY ts"):
-        acct = json.loads(e["payload"]).get("account")
-        if acct and acct not in owned:
-            row = s.get_row("refunds", e["row_key"]) or {}
-            out.append({"event_id": e["event_id"], "agent": e["agent_id"], "tool": e["tool"], "row": e["row_key"],
-                        "account": acct, "amount": row.get("amount"), "ts": e["ts"]})
+    for e in s.q("SELECT * FROM events WHERE tool IN ('create_item','change_value') ORDER BY ts"):
+        val = json.loads(e["payload"]).get("value")
+        if val and val not in owned:
+            row = s.get_row("items", e["row_key"]) or {}
+            out.append({"event_id": e["event_id"], "agent": agent_name(e["agent_id"]), "role": _role(e["agent_id"]),
+                        "row": e["row_key"], "value": val, "amount": fmt_amount(state["sc"], row.get("amount") or 0),
+                        "day": e["ts"] // 1000, "text": label(e["event_id"])})
     return out
+
+
+def _role(agent_id):
+    return next((r for r, (aid, _n, _d) in state["sc"]["agents"].items() if aid == agent_id), "other")
 
 
 @app.get("/api/graph")
 def graph():
-    """Session-level timeline graph: KB objects and sessions, with read/wrote edges."""
     s, eng = state["store"], state["engine"]
-    sessions = s.q("SELECT * FROM sessions ORDER BY ts")
-    nodes = []
-    for o in s.q("SELECT * FROM kb ORDER BY created_ts"):
-        nodes.append({"id": o["object_id"], "kind": o["kind"], "source": o["source"], "status": o["status"],
-                      "ts": o["created_ts"], "text": o["text"], "topic": o["topic"]})
-    for x in sessions:
+    nodes = [{"id": o["object_id"], "kind": o["kind"], "source": o["source"], "ts": o["created_ts"], "text": o["text"]}
+             for o in s.q("SELECT * FROM kb ORDER BY created_ts")]
+    for x in s.q("SELECT * FROM sessions ORDER BY ts"):
         acts = [eng.event[e] for e in eng.actions.get(x["session_id"], [])]
-        nodes.append({"id": x["session_id"], "kind": "session", "agent": x["agent_id"], "ts": x["ts"],
-                      "task": json.loads(x["task"]),
-                      "actions": [{"event_id": a["event_id"], "tool": a["tool"] or "save_memory", "row": a["row_key"],
-                                   "reversible": a["reversible"], "payload": json.loads(a["payload"])} for a in acts]})
-    edges = []
-    for sid, objs in eng.reads.items():
-        for o in objs:
-            edges.append({"src": o, "dst": sid, "type": "read"})
-    for e in eng.event.values():
-        if e["type"] in ("memory_write", "kb_ingest"):
-            edges.append({"src": e["session_id"], "dst": e["object_id"], "type": "wrote"})
+        nodes.append({"id": x["session_id"], "kind": "session", "role": _role(x["agent_id"]), "agent_name": agent_name(x["agent_id"]),
+                      "ts": x["ts"], "day": x["ts"] // 1000,
+                      "actions": [{"event_id": a["event_id"], "text": label(a["event_id"]), "reversible": a["reversible"]} for a in acts]})
+    edges = [{"src": o, "dst": sid, "type": "read"} for sid, objs in eng.reads.items() for o in objs]
+    edges += [{"src": e["session_id"], "dst": e["object_id"], "type": "wrote"}
+              for e in eng.event.values() if e["type"] in ("memory_write", "kb_ingest")]
     return {"nodes": nodes, "edges": edges}
 
 
-@app.post("/api/trace")
-def trace(req: TraceReq):
+# ---------------- the investigator agent (server-sent events) ----------------
+
+class ApproveReq(BaseModel):
+    approved: bool
+
+
+@app.get("/api/investigate")
+async def investigate(event_ids: str, mode: str = "auto"):
+    ids = [e for e in event_ids.split(",") if e]
     eng = state["engine"]
-    for e in req.event_ids:
-        if e not in eng.event:
-            raise HTTPException(404, f"unknown event {e}")
-    cands = eng.trace_back(req.event_ids)
-    root = next((c["object_id"] for c in cands if c["confirmed"]), None)
-    return {"candidates": cands, "root": root, "forward": eng.trace_forward(root) if root else None}
+    if not ids or any(e not in eng.event for e in ids):
+        raise HTTPException(404, "unknown event")
+    tb = investigator.Toolbox(eng, state["sc"], label, agent_name)
+    use_claude = mode == "claude" or (mode == "auto" and investigator.claude_available())
+    gen = (investigator.claude if use_claude else investigator.scripted)(tb, ids)
+
+    async def stream():
+        yield _sse({"type": "mode", "claude": use_claude})
+        value = None
+        while True:
+            try:
+                ev = await asyncio.to_thread(gen.send, value) if value is not None else await asyncio.to_thread(next, gen)
+            except StopIteration:
+                break
+            except Exception as ex:  # surface errors to the UI instead of a dead stream
+                yield _sse({"type": "error", "text": str(ex)})
+                break
+            value = None
+            if ev["type"] == "tool_result":
+                if ev["name"] == "replay_sessions":
+                    state["verdict"] = tb.verdict
+                yield _sse({**ev, "data": _ui_data(ev["name"], ev["data"])})
+            elif ev["type"] == "approval":
+                fut = asyncio.get_running_loop().create_future()
+                state["approval"] = fut
+                yield _sse({"type": "approval", "summary": ev["summary"], "rows": _plan_rows(ev["plan"]),
+                            "checklist": ev["plan"]["checklist"][:3]})
+                value = await fut
+            else:
+                yield _sse(ev)
+            if not use_claude:
+                await asyncio.sleep(0.9 if ev["type"] == "thought" else 0.5)
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@app.post("/api/verify")
-def verify(req: RootReq):
-    v = state["engine"].verify(req.root)
-    state["verdict"] = v
-    return {**v, "score": state["engine"].score(v)}
+@app.post("/api/approve")
+def approve(req: ApproveReq):
+    fut = state.get("approval")
+    if not fut or fut.done():
+        raise HTTPException(400, "nothing waiting for approval")
+    fut.get_loop().call_soon_threadsafe(fut.set_result, req.approved)
+    return {"ok": True}
 
 
-@app.post("/api/clean")
-def clean(req: RootReq):
-    v = state["verdict"]
-    if not v or v["root"] != req.root:
-        raise HTTPException(400, "run verify first")
-    before = {r["refund_id"]: r for r in state["store"].q("SELECT * FROM refunds")}
-    result = state["engine"].clean(v)
-    state["cleaned"] = result
-    after = {r["refund_id"]: r for r in state["store"].q("SELECT * FROM refunds")}
-    touched = {r["row"] for r in result["reverted"]}
-    diff = [{"row": k, "before": before.get(k), "after": after.get(k), "reverted": k in touched}
-            for k in sorted(before) if before.get(k) != after.get(k) or k in touched]
-    return {**result, "diff": diff}
+def _sse(obj):
+    return f"data: {json.dumps(obj, default=str)}\n\n"
 
 
-@app.get("/api/rows/{table}")
-def rows(table: str):
-    if table not in ("refunds", "customers", "emails"):
+def _plan_rows(plan):
+    rows = []
+    for r in plan["reverted"]:
+        if r.get("deleted"):
+            rows.append({"row": r["row"], "deleted": True})
+            continue
+        f = r["fields"].get("value")
+        rows.append({"row": r["row"], "was": f and f["was"], "now": f and f["now"], "kept": r["kept"].get("status")})
+    return rows
+
+
+def _ui_data(name, data):
+    """Only what the graph needs to animate each tool result."""
+    if data is None:
+        return None
+    if name == "trace_back":
+        best = next((c for c in data["candidates"] if c["confirmed"]), data["candidates"][0])
+        return {"root": data["root"], "path": best["path"],
+                "candidates": [{"id": c["object_id"], "confirmed": c["confirmed"]} for c in data["candidates"]]}
+    if name == "trace_forward":
+        return {"sessions": data["sessions"], "memories": data["memories"], "agents": data["agents"]}
+    if name == "replay_sessions":
+        return {"confirmed": data["confirmed"], "cleared": data["cleared"], "score": data["score"]}
+    if name == "plan_cleanup":
+        return {"quarantined": data["quarantined"]}
+    if name == "apply_cleanup":
+        return {"quarantined": data["quarantined"], "rows": _plan_rows(data)}
+    return None
+
+
+@app.get("/api/explain/{event_id}")
+def explain(event_id: str):
+    """Why is this action infected (or not)? Chain to the source + with/without-poison comparison."""
+    eng, v = state["engine"], state["verdict"]
+    e = eng.event.get(event_id)
+    if not e:
         raise HTTPException(404)
-    return state["store"].q(f"SELECT * FROM {table}")
+    out = {"event_id": event_id, "agent": agent_name(e["agent_id"]), "day": e["ts"] // 1000,
+           "with_poison": label(event_id), "status": "unexposed", "path": []}
+    if not v:
+        return out
+    if event_id in v["confirmed"]:
+        corr = v["corrections"].get(event_id)
+        out["status"] = "infected"
+        out["without_poison"] = describe(corr["tool"], corr["row_key"], corr["values"]) if corr else "Would not have done this at all"
+    elif event_id in v["cleared"]:
+        out["status"] = "cleared"
+        out["without_poison"] = "Same action, so the poison did not cause it"
+    out["path"] = [label(n) for n in (eng.path_to(event_id, v["root"]) or [])[1:]]
+    return out
 
 
 app.mount("/static", StaticFiles(directory=WEB), name="static")

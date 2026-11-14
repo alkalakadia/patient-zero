@@ -17,17 +17,19 @@ caused, and removes only that, across every agent."
 ## Layout
 - `pz/store.py`     storage. SQLite locally, emulating Delta: `row_changes` = Change Data Feed, `table_as_of` = time travel
 - `pz/recorder.py`  the recorder every agent goes through (retrieve / tool_call / memory_write). This is the product's core.
+- `pz/scenarios.py` 4 scenario skins modeled on real incidents (EchoLeak, GitHub MCP, SpAIware, United chatbot). Same shape: primary / reviewer / notifier agents + nightly job
 - `pz/agents.py`    RuleBrain: deterministic agents (no API key). Knows when it used the poison -> ground truth.
-- `pz/sim.py`       Northpeak Outfitters: 3 agents, 7 days, ~176 sessions, poisoned ticket T-4127 -> doc D-7 + worm memory
-- `pz/engine.py`    trace_back, trace_forward, verify, clean, score
-- `pz/server.py`    FastAPI API + serves `web/index.html` (Cytoscape infection graph)
+- `pz/sim.py`       builds a 7-day company week for a scenario; poison enters as a doc (D-7) or straight into memory (M-7); worm memory spreads it
+- `pz/engine.py`    trace_back, trace_forward, verify, clean, score (scenario-agnostic)
+- `pz/investigator.py` Patient Zero agent: Toolbox + scripted driver (offline) + Claude driver (tool-use loop, approval gate)
+- `pz/server.py`    FastAPI API, SSE stream `/api/investigate`, `/api/approve`, serves `web/index.html`
 
 ## Data model (mirror these as Delta tables)
 - `kb(object_id, kind doc|memory, topic, text, source internal|ticket|agent, visible_to, created_ts, created_by_session, status active|quarantined)`
 - `sessions(session_id, agent_id, ts, task)`
 - `events(event_id, session_id, agent_id, ts, type retrieve|tool_call|memory_write|kb_ingest, object_id, tool, table_name, row_key, delta_version, reversible, payload)`
 - `row_changes(version, table_name, row_key, op, before_json, after_json, session_id, event_id, ts)`  <- Delta CDF
-- business tables: `refunds`, `customers`, `emails` (emails are irreversible)
+- business tables: `items`, `entities`, `messages` (messages are irreversible); scenario skins give them display names
 - `ground_truth(event_id, poisoned)` demo only
 
 ## Run

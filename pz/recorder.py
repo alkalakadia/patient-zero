@@ -71,13 +71,13 @@ class Session:
             self.s.db.execute("INSERT INTO ground_truth VALUES (?,?)", (eid, int(poisoned)))
         return eid
 
-    def memory_write(self, object_id, topic, text, visible_to="*", poisoned=None):
+    def memory_write(self, object_id, topic, text, visible_to="*", poisoned=None, source="agent"):
         self.actions.append(("save_memory", "kb", object_id, {"text": text}))
         if self.dry_run:
             return None
         self.s.db.execute(
             "INSERT INTO kb VALUES (?,?,?,?,?,?,?,?, 'active')",
-            (object_id, "memory", topic, text, "agent", visible_to, self.ts, self.id),
+            (object_id, "memory", topic, text, source, visible_to, self.ts, self.id),
         )
         eid = self._event(type="memory_write", object_id=object_id, payload={"text": text, "derived_from": self.context})
         if poisoned is not None:

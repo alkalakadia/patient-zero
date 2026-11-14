@@ -1,24 +1,35 @@
 # Patient Zero
 
-**Contact tracing for AI agents.** When a poisoned document or memory compromises your agents, Patient Zero
-finds the source, traces everything it spread to across every agent, proves which actions it actually caused,
-and surgically undoes only that damage.
+**Incident response for AI agents.** When a poisoned email, GitHub issue, ticket or memory compromises your agents,
+Patient Zero's investigator agent finds the source, traces everything it spread to across every agent, proves which
+actions it caused by replaying them without it, and, after a human approves, undoes only that damage.
 
-## Quick start
+## Run it
 ```bash
 python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
-./.venv/bin/python -m pz demo                    # terminal run, no API key needed
 ./.venv/bin/uvicorn pz.server:app --port 8100    # open http://localhost:8100
-./.venv/bin/python -m pytest -q                  # regression tests
+./.venv/bin/python -m pz github                  # terminal run of one scenario
+./.venv/bin/python -m pytest -q                  # 17 tests across all scenarios
 ```
+Set `ANTHROPIC_API_KEY` to have Claude drive the investigation live; without it the investigator runs in offline
+mode with scripted reasoning over the same tools (the UI says which mode is on).
 
-## Current demo result (simulated week, 176 sessions, 351 agent actions)
-- Trace back: poisoned ticket D-7 confirmed as the source; real policy docs D-1, D-2 ruled out by counterfactual test
-- Spread: 39 sessions across 3 agents, including second-hand infection through a worm memory
-- Verify: 127 suspects narrowed to 38 proven infected (precision 30% -> 100%, recall 100% on planted ground truth)
-- Clean: 32 rows reverted field by field, 5 irreversible emails on a human checklist,
-  266 legitimate changes kept that a point-in-time restore would have destroyed
+## Scenarios (fictional companies, modeled on real incidents)
+| Scenario | Inspired by |
+|---|---|
+| Poisoned email to an accounts-payable assistant | EchoLeak, CVE-2025-32711, Microsoft 365 Copilot (June 2025) |
+| Malicious GitHub issue to a coding agent | GitHub MCP prompt injection, Invariant Labs (May 2025) |
+| Poisoned long-term memory in a sales assistant | SpAIware, ChatGPT memory (September 2024) |
+| Refund fraud through a support ticket | United Airlines support chatbot (single reported case) |
 
-Note: these numbers come from the deterministic offline agents. Real-model numbers will differ.
+## How the investigator works
+Alert -> `trace_back` (walk back through what each agent read; hide each candidate and replay) -> `trace_forward`
+(every session, agent and memory it reached) -> `replay_sessions` (actions that change without the poison were caused
+by it) -> `plan_cleanup` -> human approval -> `apply_cleanup` (field-level revert from the change feed, quarantine,
+checklist for irreversible messages) -> report.
 
-See `CLAUDE.md` for architecture, data model and roadmap.
+The agent orchestrates; the tools decide. Findings come from graph walks and replays, so the poisoned text the
+investigator reads can't talk it into a wrong answer. Precision/recall numbers come from deterministic simulated
+agents with planted ground truth; real-model runs will be noisier.
+
+See `CLAUDE.md` for architecture and roadmap.

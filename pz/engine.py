@@ -73,11 +73,11 @@ class Engine:
                     seen.add(obj)
                     p = path + [obj]
                     w = self.writer.get(obj)
+                    # every object is a candidate; memories are also followed upstream to whatever wrote them
+                    explains[obj].add(eid)
+                    paths.setdefault((obj, eid), p)
                     if self.kb[obj]["kind"] == "memory" and w:
                         stack.append((w, p + [w]))
-                    else:
-                        explains[obj].add(eid)
-                        paths.setdefault((obj, eid), p)
 
         candidates = []
         for obj, evs in explains.items():
@@ -92,11 +92,12 @@ class Engine:
                     hidden.add(mem)
             changed = self._action_changed(probe, hidden)
             candidates.append({
-                "object_id": obj, "source": self.kb[obj]["source"], "text": self.kb[obj]["text"],
+                "object_id": obj, "kind": self.kb[obj]["kind"], "source": self.kb[obj]["source"], "text": self.kb[obj]["text"],
                 "explains": len(evs), "of": len(event_ids), "exposed_sessions": len(self._exposed_sessions(obj)),
                 "confirmed": changed, "path": paths[(obj, probe)],
             })
-        candidates.sort(key=lambda c: (not c["confirmed"], -c["explains"], c["exposed_sessions"]))
+        # patient zero is the most upstream object whose removal changes the outcome
+        candidates.sort(key=lambda c: (not c["confirmed"], self.kb[c["object_id"]]["created_ts"], -c["explains"]))
         return candidates
 
     def _derived_memories(self, root):
@@ -138,6 +139,24 @@ class Engine:
                 return True
         return False
 
+    def path_to(self, eid, root):
+        """The chain from an action back to the root: [event, session, (memory, writer session)*, root]."""
+        def walk(sess, path, seen):
+            for obj in self.reads.get(sess, []):
+                if obj in seen:
+                    continue
+                seen.add(obj)
+                if obj == root:
+                    return path + [obj]
+                w = self.writer.get(obj)
+                if self.kb[obj]["kind"] == "memory" and w:
+                    found = walk(w, path + [obj, w], seen)
+                    if found:
+                        return found
+            return None
+        sid = self.event[eid]["session_id"]
+        return walk(sid, [eid, sid], set())
+
     # ---------- trace forward ----------
     def trace_forward(self, root):
         memories = self._derived_memories(root)
@@ -166,7 +185,7 @@ class Engine:
     def _counterpart(e, replay):
         """What the agent would have done without the poison (same tool, same row)."""
         for (t, tb, k, v) in replay:
-            if t == e["tool"] and (k == e["row_key"] or t == "send_email"):
+            if t == e["tool"] and (k == e["row_key"] or t == "send_message"):
                 return {"tool": t, "row_key": k, "values": v}
         return None
 
