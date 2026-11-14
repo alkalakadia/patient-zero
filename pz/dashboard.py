@@ -20,7 +20,7 @@ def _counter(name, ds, field, label, x, y):
 
 def _table(name, ds, cols, title, x, y, w=6, h=7):
     return {"widget": {"name": name, "queries": [{"name": "main_query", "query": {"datasetName": ds, "fields": [{"name": c, "expression": f"`{c}`"} for c in cols], "disaggregated": True}}],
-                       "spec": {"version": 1, "widgetType": "table", "encodings": {"columns": [{"fieldName": c, "displayName": c} for c in cols]},
+                       "spec": {"version": 2, "widgetType": "table", "encodings": {"columns": [{"fieldName": c, "displayName": c} for c in cols]},
                                 "frame": {"showTitle": True, "title": title}}},
             "position": {"x": x, "y": y, "width": w, "height": h}}
 
@@ -34,7 +34,7 @@ def spec():
         _ds("events", "Agent activity", f"SELECT run_id, agent_id, tool, count(*) AS actions FROM {S}.agent_events WHERE type='tool_call' GROUP BY ALL ORDER BY run_id, actions DESC"),
     ]
     layout = [
-        {"widget": {"name": "title", "multilineTextboxSpec": {"lines": ["## Patient Zero", "Incident response for AI agents: what was poisoned, what it caused, what was undone."]}},
+        {"widget": {"name": "title", "multilineTextboxSpec": {"lines": ["## Patient Zero\n", "Incident response for AI agents: what was poisoned, what it caused, what was undone."]}},
          "position": {"x": 0, "y": 0, "width": 6, "height": 2}},
         _counter("c1", "totals", "incidents", "Incidents", 0, 2),
         _counter("c2", "totals", "actions_proven", "Agent actions proven caused by poison", 2, 2),

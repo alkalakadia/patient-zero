@@ -609,7 +609,12 @@ def explain(event_id: str):
     if event_id in v["confirmed"]:
         corr = v["corrections"].get(event_id)
         out["status"] = "infected"
-        out["without_poison"] = describe(corr["tool"], corr["row_key"], corr["values"]) if corr else "Would not have done this at all"
+        if corr:
+            out["without_poison"] = describe(corr["tool"], corr["row_key"], corr["values"])
+        elif v.get("by") == "evidence":
+            out["without_poison"] = "Carries the flagged value that only the poisoned source contains"
+        else:
+            out["without_poison"] = "Different: the replay without the poison did not repeat this action"
     elif event_id in v["cleared"]:
         out["status"] = "cleared"
         out["without_poison"] = "Same action, so the poison did not cause it"
