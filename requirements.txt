@@ -2,3 +2,8 @@ fastapi
 uvicorn[standard]
 anthropic
 pytest
+databricks-sdk
+databricks-sql-connector
+mlflow-skinny
+mcp<2
+requests

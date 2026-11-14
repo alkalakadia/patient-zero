@@ -126,6 +126,9 @@ class Engine:
 
     def _norm(self, tool, key, vals):
         """Compare actions by what matters, not wording: free text is reduced to the sensitive values it mentions."""
+        if tool == "open_pull_request":
+            text = json.dumps(vals.get("files", {})) + (vals.get("body") or "")
+            return (tool, frozenset(self.value_re.findall(text)))
         if tool in ("save_memory", "send_message"):
             text = vals.get("text") or vals.get("body") or ""
             return (tool, frozenset(self.value_re.findall(text)))

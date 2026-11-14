@@ -116,7 +116,10 @@ def label_ground_truth(store, attacker_value):
 
 
 def scenario_of(store):
+    from .scenarios import GITHUB_LIVE
     row = store.one("SELECT v FROM meta WHERE k='scenario'")
+    if row and row["v"] == "github_live":
+        return GITHUB_LIVE
     return SCENARIOS[row["v"]] if row else SCENARIOS[DEFAULT]
 
 
