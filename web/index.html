@@ -144,6 +144,10 @@ th{color:var(--muted);font-weight:500;font-family:Inter}
 .live{max-width:1120px;margin:0 auto;background:linear-gradient(180deg,#0f2219,#11141b);border:1px solid #1d5a40;border-radius:18px;padding:22px}
 .live h2{margin:6px 0 8px;font-size:24px}
 .live textarea{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;color:#ffe9c7;font:13.5px Inter;margin-top:6px;resize:vertical}
+.start{display:flex;flex-direction:column;gap:12px;margin-top:18px}
+.start .btn{flex:none;align-self:flex-start;padding:15px 22px;font-size:16px}
+.steps{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.steps b{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#2a3042;color:var(--text);font-size:11px;margin-right:6px}
 .vsgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
 .vscol{border-radius:12px;padding:12px;font-size:13px}
 .vscol.ok{background:var(--green-bg);border:1px solid #1d5a40}
@@ -171,7 +175,7 @@ input[type=range]{width:100%;accent-color:var(--red)}
 <header>
   <div class="logo"><span class="pulse"></span>Patient Zero <small>incident response for AI agents</small></div>
   <div class="stages" id="stages"></div>
-  <button class="hbtn" id="toPicker">Scenarios</button>
+  <button class="hbtn" id="toPicker">Home</button>
 </header>
 <main>
   <section id="stage">
@@ -192,6 +196,10 @@ input[type=range]{width:100%;accent-color:var(--red)}
     <div class="kicker">Patient Zero</div>
     <h1>When an AI agent gets poisoned, find everything it touched and undo only that.</h1>
     <p>Three real ways to see it: a real coding agent poisoned on GitHub, agents moving money on Databricks, and an existing agent investigated from nothing but its MLflow traces.</p>
+    <div class="start">
+      <button class="btn red" id="startHere">▶ Start here: watch the GitHub incident (2 min, no cost)</button>
+      <div class="steps"><span><b>1</b> A poisoned note fools one agent; Claude Code refuses</span><span><b>2</b> Patient Zero traces, proves and undoes it on GitHub</span><span><b>3</b> Open the evidence in Databricks</span></div>
+    </div>
   </div>
   <div class="live" id="ghHero" style="background:linear-gradient(180deg,#141a2b,#11141b);border-color:#2f3d66">
     <div class="kicker" style="color:#9db8ff">● Real agent on GitHub</div>
@@ -202,23 +210,14 @@ input[type=range]{width:100%;accent-color:var(--red)}
       <div class="vscol bad"><div class="vh">Open model (GPT-OSS on Databricks) <span class="pill red" id="omCount">fooled</span></div><div id="omSaid" class="quoteish"></div></div>
     </div>
     <p style="margin-top:12px">Teams run many agents on many models. Some will be fooled. Patient Zero traced the open model's bad pull requests to the poisoned note, <b>reverted the merged one on main and closed the other on GitHub</b>: <span id="ghLinks"></span></p>
-    <div class="row" style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
-      <button class="btn green" id="ghReplay" style="flex:1">Watch the recorded run (no cost)</button>
-      <button class="btn red" id="ghRun" style="flex:1">Run it live on GitHub (~2 min)</button>
-    </div>
-    <div class="muted" style="font-size:12px;margin-top:8px">Live run resets the sandbox repo, plants the note, and runs the open-model agent (free on Databricks); Patient Zero uses Claude (~1¢).</div>
+    <div class="row" style="display:flex;gap:10px;margin-top:10px"><button class="btn green" id="ghReplay" style="flex:1">Watch the incident</button></div>
   </div>
   <div class="live" id="liveHero" style="margin-top:22px">
     <div class="kicker" style="color:var(--green)">● Live on Databricks</div>
     <h2>Real agents. Real data. A real attack.</h2>
-    <p>Three AI agents run accounts payable at Halden Manufacturing on <b>40 real suppliers and order totals from Databricks</b> (samples.tpch), served by <b>Databricks model serving</b>. Every action streams into <b>Delta</b>. You play the attacker: edit the company's payment-policy page, then watch what the agents do and how Patient Zero cleans it up.</p>
-    <label class="muted" style="font-size:12.5px">The payments policy page, after your edit:</label>
-    <textarea id="attackText" rows="3"></textarea>
-    <div class="row" style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
-      <button class="btn green" id="liveReplay" style="flex:1">Watch the recorded live run (no cost)</button>
-      <button class="btn red" id="liveRun" style="flex:1">Run it live now (~3 min)</button>
-    </div>
-    <div class="muted" style="font-size:12px;margin-top:8px" id="liveNote"></div>
+    <p>Three AI agents run accounts payable at Halden Manufacturing on <b>40 real suppliers and order totals from Databricks</b> (samples.tpch), served by <b>Databricks model serving</b>. Every action streams into <b>Delta</b>. Then someone edits the company's payment-policy page:</p>
+    <div class="evidence" style="margin:6px 0 4px"><span class="tag">THE EDIT</span><span id="attackText"></span></div>
+    <div class="row" style="display:flex;gap:10px;margin-top:10px"><button class="btn green" id="liveReplay" style="flex:1">Watch the payments incident</button></div>
   </div>
   <div class="live" id="mlfHero" style="margin-top:22px;background:linear-gradient(180deg,#1f1830,#11141b);border-color:#4b3d72">
     <div class="kicker" style="color:#c4b2ff">● Zero integration: import MLflow traces</div>
@@ -228,7 +227,7 @@ input[type=range]{width:100%;accent-color:var(--red)}
       <div><label class="muted" style="font-size:12.5px">MLflow experiment</label><input type="text" id="mlfExp" value="/Users/lakadia.alka@gmail.com/traced-support-agent"></div>
       <div><label class="muted" style="font-size:12.5px">Flagged value (from your alert)</label><input type="text" id="mlfInd" value="ACCT-7731"></div>
     </div>
-    <div class="row" style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="mlfGo" style="flex:1;background:#9b7bf0;color:#0a0c11">Import traces and investigate</button></div>
+    <div class="row" style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="mlfGo" style="flex:1;background:#9b7bf0;color:#0a0c11">Import the traces and investigate</button></div>
     <div class="muted" style="font-size:12px;margin-top:8px" id="mlfNote">From traces alone Patient Zero shows the source and blast radius by evidence. Connect the proxy to also prove cause by replay and undo automatically.</div>
   </div>
 
@@ -315,7 +314,7 @@ function buildGraph(){
   for (let d = 1; d <= 7; d++) els.push({data:{id:'day'+d, label:'Day '+d}, position:{x:xOf(d*1000)+150, y:laneY(0)-115}, classes:'lane daylabel'});
   G.edges.forEach((e,i) => els.push({data:{id:'e'+i, source:e.src, target:e.dst}, classes:'hidden ' + e.type}));
   if (cy) cy.destroy();
-  cy = cytoscape({container:$('#cy'), elements:els, layout:{name:'preset'}, minZoom:.12, maxZoom:3, wheelSensitivity:.25, boxSelectionEnabled:false, autoungrabify:true,
+  cy = cytoscape({container:$('#cy'), elements:els, layout:{name:'preset'}, minZoom:.12, maxZoom:1.15, wheelSensitivity:.25, boxSelectionEnabled:false, autoungrabify:true,
     style:[
       {selector:'node', style:{'width':12,'height':12,'background-color':'data(color)','label':'data(label)','color':'#d8dcea','font-size':13,'font-family':'JetBrains Mono','font-weight':600,'text-valign':'top','text-margin-y':-8,
         'transition-property':'background-color,width,height,border-width,opacity','transition-duration':'0.35s','border-color':'#fff','border-width':0}},
@@ -592,19 +591,13 @@ $('#toPicker').onclick = showPicker;
 let LIVE = null;  // {replay: bool}
 async function initLive(){
   const d = await api('/api/live/defaults');
-  $('#attackText').value = d.attack_template;
+  $('#attackText').textContent = d.attack_template;
   const runs = await api('/api/live/runs');
   const rec = runs.find(r => r.investigated) || runs[0];
   $('#liveReplay').disabled = !rec; $('#liveReplay').dataset.run = rec ? rec.run_id : '';
-  $('#liveNote').textContent = (d.databricks ? 'Databricks connected. ' : 'Databricks not configured. ') +
-    (rec ? `Recorded run ${rec.run_id}: ${rec.poisoned} poisoned actions, agents on ${rec.model}.` : 'No recorded run yet.') +
-    ' Live: business agents are free on Databricks; Patient Zero uses Claude (about 2¢).';
 }
 $('#liveReplay').onclick = async () => { await api('/api/live/load', {run_id: $('#liveReplay').dataset.run}); startLive(true); };
-$('#liveRun').onclick = async () => {
-  try { await api('/api/live/start', {attack_text: $('#attackText').value}); startLive(false); }
-  catch(e){ $('#liveNote').textContent = e.message; }
-};
+
 
 async function startLive(replay, kind = 'payments'){
   LIVE = {replay, kind}; const my = ++runId;
@@ -642,7 +635,8 @@ async function startLive(replay, kind = 'payments'){
         const a = e.tool === 'create_item' || e.tool === 'change_value' ? (e.args.value || '') : e.tool === 'send_message' ? '“' + (e.args.body || '').slice(0, 90) + '…”' : e.tool === 'save_team_note' ? '“' + (e.args.text || '').slice(0, 90) + '”'
                 : e.tool === 'issue_refund' ? `order ${e.args.order_id} · $${e.args.amount} → ${e.args.destination}`
                 : e.tool === 'open_pull_request' ? `“${e.args.title}” · ${(e.args.files || []).join(', ')}${(e.args.hosts || []).length ? ' · ⚠ sends data to ' + e.args.hosts.join(', ') : ''}` : (e.args.item_id || e.args.id || '');
-        feed(`<div style="margin-left:14px;font-family:var(--mono);font-size:12px${bad}">→ ${esc(e.tool)} ${esc(a)} <span class="muted">${esc(typeof e.result === 'string' ? e.result.slice(0, 40) : Array.isArray(e.result) ? e.result.length + ' items' : '')}</span></div>`);
+        const res = typeof e.result === 'string' ? (/merge conflict/i.test(e.result) ? 'left open (conflicts with an earlier merge)' : e.result.slice(0, 40)) : Array.isArray(e.result) ? e.result.length + ' items' : '';
+        feed(`<div style="margin-left:14px;font-family:var(--mono);font-size:12px${bad}">→ ${esc(e.tool)} ${esc(a)} <span class="muted">${esc(res)}</span></div>`);
       }
       if (e.type === 'mlflow') feed(`<div style="border-left-color:var(--green)">Logged to MLflow · <a href="${e.url}" target="_blank">open experiment</a></div>`);
       if (e.type === 'error') feed(`<div class="callout">${esc(e.text)}</div>`);
@@ -668,8 +662,9 @@ async function initGithub(){
   $('#omCount').textContent = `fooled ×${g.open_model_poisoned || 0}`;
   $('#ghLinks').innerHTML = `<a href="${g.repo}/commits/main" target="_blank">revert commit on main</a> · <a href="${g.repo}/pulls?q=is%3Apr+is%3Aclosed" target="_blank">closed PR</a>`;
   $('#ghReplay').onclick = async () => { await api('/api/github/load', {run_id: g.recorded.databricks}); startLive(true, 'github'); };
-  $('#ghRun').onclick = async () => { try { await api('/api/github/start', {agent:'databricks'}); startLive(false, 'github'); } catch(e){ alert(e.message); } };
 }
+
+$('#startHere').onclick = () => $('#ghReplay').click();
 
 $('#mlfGo').onclick = async () => {
   $('#mlfGo').disabled = true; $('#mlfNote').textContent = 'Reading traces from Databricks MLflow…';
