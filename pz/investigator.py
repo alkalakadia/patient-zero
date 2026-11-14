@@ -209,6 +209,42 @@ def _report(tb, root, tr, fw, rp, pl, approved):
     }
 
 
+def scripted_import(tb, alert_ids):
+    """Investigation over imported MLflow traces: no replay hook, so cause is shown by evidence."""
+    ind = tb.e.evidence
+    yield {"type": "status", "text": "Investigating imported traces"}
+    yield {"type": "thought", "text": f"These are MLflow traces from an agent I'm not connected to, so I can't re-run it. I'll establish cause "
+                                      f"by evidence instead: the flagged value {ind} appearing both in what the agent read and in what it did."}
+    yield from _call(tb, "trace_back", {"event_ids": alert_ids})
+    tr = tb._last
+    root = tr["patient_zero"]
+    if not root:
+        yield {"type": "thought", "text": f"None of the documents these actions read contain {ind}. Escalating to a human."}
+        yield {"type": "done"}
+        return
+    others = [c["id"] for c in tr["candidates"] if not c["removing_it_changes_outcome"]]
+    yield {"type": "thought", "text": f"{root} is the earliest source that contains {ind} and was read before every flagged action"
+                                      + (f"; {', '.join(others)} don't mention it" if others else "") + ". That's patient zero."}
+    yield from _call(tb, "trace_forward", {"root": root})
+    fw = tb._last
+    yield {"type": "thought", "text": f"It reached {fw['sessions_exposed']} traces"
+                                      + (f", and spread through team notes {', '.join(fw['memories_contaminated'])}" if fw["memories_contaminated"] else "")
+                                      + ". Now I'll sort what those traces did."}
+    yield from _call(tb, "replay_sessions", {"root": root})
+    rp = tb._last
+    yield {"type": "thought", "text": f"{rp['proven_caused_by_poison']} actions carry {ind} (the refunds and the notes that copied the rule); "
+                                      f"{rp['cleared_by_replay']} don't, so I'm leaving them alone."}
+    yield from _call(tb, "plan_cleanup", {"root": root})
+    pl = tb._last
+    yield {"type": "thought", "text": f"I can quarantine {', '.join(pl['quarantine'])} so no agent reads them again. The {pl['irreversible_for_human_checklist']} "
+                                      "refunds already went out through a system I'm not connected to, so they go to a human to reverse with the payment provider."}
+    approved = yield {"type": "approval", "plan": tb.plan, "summary": pl}
+    yield from _call(tb, "apply_cleanup", {"root": root, "approved": bool(approved)})
+    yield {"type": "thought", "text": "Connect this agent through the Patient Zero proxy or SDK and I can also prove cause by replay and undo actions automatically."}
+    yield {"type": "report", "data": _report(tb, root, tr, fw, rp, pl, approved)}
+    yield {"type": "done"}
+
+
 # ---------------------------------------------------------------- Claude driver
 
 SYSTEM = """You are Patient Zero, an incident-response agent for AI agent systems.

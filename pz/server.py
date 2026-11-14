@@ -58,7 +58,7 @@ def agent_name(agent_id):
 
 def describe(tool, row, p, sc=None):
     sc = sc or state["sc"]
-    T = sc["texts"]
+    T = sc.get("texts", {})
     amt = fmt_amount(sc, p["amount"]) if "amount" in p else ""
     if tool == "create_item":
         return T["primary"].format(row=row, amount=amt, value=p["value"])
@@ -74,7 +74,12 @@ def describe(tool, row, p, sc=None):
         return f"Messaged {p['to_addr']}: “{p['body']}”"
     if tool == "save_memory":
         return f"Saved a team memory: “{p.get('text', '')}”"
-    return f"{tool} {row}"
+    if tool == "open_pull_request":
+        return f"Opened PR \u201c{p.get('title')}\u201d ({', '.join(p.get('files', {}))})"
+    if tool == "merge":
+        return f"Merged {p.get('url', row)}"
+    args = ", ".join(f"{k}={v}" for k, v in p.items() if not k.startswith("_"))
+    return f"{tool}({args})" if args else f"{tool} {row}"
 
 
 def label(n, eng=None, sc=None):
@@ -140,7 +145,7 @@ def overview():
         "agents": sc["agents"], "item": sc["item"], "entity": sc["entity"], "field": sc["field"],
         "sessions": s.one("SELECT COUNT(*) n FROM sessions")["n"],
         "actions": s.one("SELECT COUNT(*) n FROM events WHERE type IN ('tool_call','memory_write')")["n"],
-        "attack": state["attack"], "poison": {**p, "label": sc["poison"]["label"]},
+        "attack": state["attack"], "poison": {**p, "label": sc.get("poison", {}).get("label", "")},
         "claude": investigator.claude_available(),
     }
 
@@ -149,6 +154,12 @@ def overview():
 def alerts():
     """A plain detection rule produces the symptom: a sensitive value no known entity owns."""
     s = state["store"]
+    if state.get("imported"):
+        ind = state["engine"].evidence
+        from .mlflow_import import _norm
+        return [{"event_id": e["event_id"], "agent": agent_name(e["agent_id"]), "role": "primary", "row": e["row_key"], "value": ind,
+                 "amount": "", "day": 1, "text": label(e["event_id"])}
+                for e in s.q("SELECT * FROM events WHERE type='tool_call' ORDER BY ts") if ind in _norm(e["payload"])]
     if state.get("github"):
         allowed = set(state["sc"]["allowed_hosts"])
         rx = re.compile(state["sc"]["value_re"])
@@ -305,7 +316,7 @@ async def live_stream(speed: float = 1.0):
             if run.done and i >= len(run.events):
                 break
             await asyncio.sleep(0.25)
-        if not run.error:
+        if not run.error and not state.get("imported"):
             if state.get("github"):
                 _adopt_github(run)
             else:
@@ -319,10 +330,36 @@ def _adopt_live(run):
     """Point the API at the live run's data; replays use the same real Claude agents."""
     if state.get("adopted") == run.id:
         return
+    state.pop("imported", None)
     if run.delta:
         run.store.time_travel = lambda ts: run.delta.items_as_of(ts)[1]  # replays read payments via Delta time travel
     state.update(store=run.store, engine=Engine(run.store, brain=type(run.brain)(run.sc)), scenario="inbox", sc=run.sc,
                  attack={"value": run.attacker_value}, verdict=None, approval=None, adopted=run.id)
+
+
+# ---------------- import an agent's existing MLflow traces ----------------
+
+class ImportReq(BaseModel):
+    experiment: str = "/Users/lakadia.alka@gmail.com/traced-support-agent"
+    indicator: str = "ACCT-7731"
+
+
+@app.post("/api/import/mlflow")
+def import_mlflow(req: ImportReq):
+    from .mlflow_import import ImportRun, _norm
+    from .scenarios import MLFLOW_IMPORT
+    if not databricks.available():
+        raise HTTPException(400, "Databricks is not configured")
+    try:
+        run = ImportRun(req.experiment, req.indicator).run()
+    except Exception as ex:
+        raise HTTPException(400, f"could not import traces: {str(ex)[:200]}")
+    keep = {k: state[k] for k in ("dashboard_url",) if k in state}
+    state.clear()
+    state.update(keep)
+    state.update(live=run, store=run.store, engine=Engine(run.store, evidence=_norm(req.indicator)), scenario="mlflow_import",
+                 sc=MLFLOW_IMPORT, attack={}, verdict=None, approval=None, adopted=run.id, imported=True)
+    return {"run_id": run.id, "sessions": run.store.one("SELECT COUNT(*) n FROM sessions")["n"]}
 
 
 # ---------------- real coding agent on GitHub ----------------
@@ -387,6 +424,7 @@ def _adopt_github(run):
     from .scenarios import GITHUB_LIVE
     if state.get("adopted") == run.id:
         return
+    state.pop("imported", None)
     who = "Coding agent (Claude Code)" if run.agent == "claude-code" else "Coding agent (GPT-OSS on Databricks)"
     sc = {**GITHUB_LIVE, "agents": {**GITHUB_LIVE["agents"], "primary": ("coding_agent", who, GITHUB_LIVE["agents"]["primary"][2])}}
     state.update(live=run, store=run.store, engine=Engine(run.store, brain=ClaudeCodeBrain(run.db, agent=run.agent)),
@@ -437,8 +475,9 @@ async def investigate(event_ids: str, mode: str = "auto"):
                                                                                       "proven": len(tb.verdict["confirmed"]),
                                                                                       "cleared": len(tb.verdict["cleared"])}),
                                         "link": run.delta.table_link("payments")}
-    use_claude = mode == "claude" or (mode == "auto" and investigator.claude_available())
-    gen = (investigator.claude if use_claude else investigator.scripted)(tb, ids)
+    use_claude = not state.get("imported") and (mode == "claude" or (mode == "auto" and investigator.claude_available()))
+    driver = investigator.scripted_import if state.get("imported") else investigator.claude if use_claude else investigator.scripted
+    gen = driver(tb, ids)
 
     recording = []
     is_live = bool(run and state.get("adopted") == run.id)

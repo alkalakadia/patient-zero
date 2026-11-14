@@ -120,6 +120,9 @@ def scenario_of(store):
     row = store.one("SELECT v FROM meta WHERE k='scenario'")
     if row and row["v"] == "github_live":
         return GITHUB_LIVE
+    if row and row["v"] == "mlflow_import":
+        from .scenarios import MLFLOW_IMPORT
+        return MLFLOW_IMPORT
     return SCENARIOS[row["v"]] if row else SCENARIOS[DEFAULT]
 
 

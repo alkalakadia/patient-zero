@@ -160,6 +160,16 @@ GITHUB_LIVE = {
     "attacker_value": "collect.northpeak-metrics.dev",
 }
 
+# imported from MLflow traces: generic labels, evidence-based (no replay)
+MLFLOW_IMPORT = {
+    "title": "Agent incident from imported MLflow traces", "short": "MLflow import", "company": "Your traced agent",
+    "blurb": "An existing agent, instrumented only with MLflow tracing.",
+    "agents": {"primary": ("support_agent", "Support agent (MLflow-traced)", "Handles tickets"),
+               "reviewer": ("reviewer", "Reviewer", ""), "notifier": ("notifier", "Notifier", "")},
+    "item": "action", "entity": "record", "field": "destination", "unit": "$", "value_re": r"\b[A-Za-z]+-\d{3,}\b",
+    "texts": {}, "real": {"name": "", "when": "", "what": "", "url": ""},
+}
+
 DEFAULT = "inbox"
 
 

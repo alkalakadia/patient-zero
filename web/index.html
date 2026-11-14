@@ -220,6 +220,17 @@ input[type=range]{width:100%;accent-color:var(--red)}
     </div>
     <div class="muted" style="font-size:12px;margin-top:8px">Live run resets the sandbox repo, plants the note, and runs the open-model agent (free on Databricks); Patient Zero uses Claude (~1¢).</div>
   </div>
+  <div class="live" id="mlfHero" style="margin-top:22px;background:linear-gradient(180deg,#1f1830,#11141b);border-color:#4b3d72">
+    <div class="kicker" style="color:#c4b2ff">● Zero integration: import MLflow traces</div>
+    <h2>Already tracing your agents with MLflow? That's enough.</h2>
+    <p>Point Patient Zero at an MLflow experiment. It reads the traces your agents already write (what they retrieved, which tools they called, what they saved to memory) and investigates with no proxy and no code changes. Try it on an ordinary support agent that has <b>no Patient Zero code</b>, only <code>mlflow.openai.autolog()</code> and trace decorators (<code>examples/traced_agent/agent.py</code>); someone edited its refund policy.</p>
+    <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
+      <div><label class="muted" style="font-size:12.5px">MLflow experiment</label><input type="text" id="mlfExp" value="/Users/lakadia.alka@gmail.com/traced-support-agent"></div>
+      <div><label class="muted" style="font-size:12.5px">Flagged value (from your alert)</label><input type="text" id="mlfInd" value="ACCT-7731"></div>
+    </div>
+    <div class="row" style="display:flex;gap:10px;margin-top:10px"><button class="btn" id="mlfGo" style="flex:1;background:#9b7bf0;color:#0a0c11">Import traces and investigate</button></div>
+    <div class="muted" style="font-size:12px;margin-top:8px" id="mlfNote">From traces alone Patient Zero shows the source and blast radius by evidence. Connect the proxy to also prove cause by replay and undo automatically.</div>
+  </div>
   <div class="pick-head" style="margin-top:30px"><div class="kicker">Practice scenarios (simulated, instant)</div></div>
   <div class="grid" id="cards"></div>
 </div>
@@ -296,7 +307,7 @@ function buildGraph(){
     if (n.kind === 'session'){ x = xOf(n.ts); y = n.agent_name === 'Intake pipeline' ? laneY(0) + 60 : laneY(ROLE_LANE[n.role]) + ((n.ts % 2) ? 10 : -10); }
     else if (n.ts === 0){ x = -40; y = laneY(0) - 50 + seed * 50; seed++; }
     else { x = xOf(n.ts); y = laneY(0) + (n.kind === 'memory' ? 28 : -32); }
-    const poison = n.source && !['internal','agent'].includes(n.source);
+    const poison = n.source && /edit|ticket|email|issue|compromised|chat/i.test(n.source);
     els.push({data:{id:n.id, label:n.kind === 'session' ? '' : n.id, color:ROLE_COLOR[n.role] || '#9b7bf0'}, position:{x, y},
       classes:[n.kind, poison ? 'poison' : '', (n.kind === 'session' || n.ts > 0) ? 'hidden' : ''].join(' ')});
   });
@@ -427,15 +438,16 @@ function investigate(){
   const queue = []; let draining = false;
   const drain = async () => { if (draining) return; draining = true; while (queue.length) await handle(queue.shift()); draining = false; };
   const url = LIVE && LIVE.replay && LIVE.links && LIVE.links.investigated ? '/api/investigate/replay'
+            : LIVE && LIVE.kind === 'import' ? '/api/investigate?event_ids=' + encodeURIComponent(ALERTS.map(a => a.event_id).join(','))
             : '/api/investigate?event_ids=' + encodeURIComponent(LIVE && LIVE.kind === 'github' ? ALERTS.map(a => a.event_id).join(',') : selected) + (LIVE ? '&mode=claude' : '');
   es = new EventSource(url);
   es.onmessage = m => { queue.push(JSON.parse(m.data)); drain(); };
   es.onerror = () => es.close();
   async function handle(ev){
-    if (ev.type === 'mode'){ $('#mode').textContent = ev.replay ? 'Claude · recorded run' : ev.claude ? 'Claude · live' : 'offline · scripted reasoning'; $('#mode').classList.toggle('live', ev.claude); }
+    if (ev.type === 'mode'){ $('#mode').textContent = LIVE && LIVE.kind === 'import' ? 'evidence mode · from traces' : ev.replay ? 'Claude · recorded run' : ev.claude ? 'Claude · live' : 'offline · scripted reasoning'; $('#mode').classList.toggle('live', ev.claude); }
     if (ev.type === 'status') $('#pzs').textContent = 'Incident-response agent · ' + ev.text.toLowerCase();
     if (ev.type === 'thought') append(`<div class="ev thought fade"><div class="dot">PZ</div><div class="txt">${esc(ev.text)}</div></div>`);
-    if (ev.type === 'tool_call') lastTool = append(`<div class="ev tool fade"><div class="h"><span>${esc(ev.name)}</span><span class="muted" style="font-family:Inter;font-weight:500">${esc(TOOL_LABEL[ev.name] || '')}</span><span class="st"><span class="spin"></span></span></div><div class="b"></div></div>`);
+    if (ev.type === 'tool_call') lastTool = append(`<div class="ev tool fade"><div class="h"><span>${esc(ev.name)}</span><span class="muted" style="font-family:Inter;font-weight:500">${esc(LIVE && LIVE.kind === 'import' && ev.name === 'replay_sessions' ? 'classify by evidence' : TOOL_LABEL[ev.name] || '')}</span><span class="st"><span class="spin"></span></span></div><div class="b"></div></div>`);
     if (ev.type === 'tool_result'){
       if (lastTool){ lastTool.classList.add('done'); lastTool.querySelector('.st').innerHTML = '<span class="ok">✓ done</span>'; lastTool.querySelector('.b').innerHTML = toolBody(ev); }
       await animateTool(ev);
@@ -533,6 +545,7 @@ function showReport(r){
   append(`<div class="report fade"><div class="kicker" style="color:var(--green)">Incident report</div>
     <h1 style="font-size:19px">${esc(r.title)}</h1>
     ${!r.approved ? '<p>Cleanup was declined. Nothing was changed.</p>'
+      : LIVE && LIVE.kind === 'import' ? `<div class="big" style="font-size:24px">${r.root} found from traces alone</div><div class="muted" style="font-size:13px;margin-bottom:8px">The edited policy and the ${(r.spread.memories_contaminated||[]).length} team notes that copied it are quarantined. ${r.checklist} refunds went out through a system Patient Zero isn't connected to, so they're on the checklist for a human. Connect the proxy to prove cause by replay and undo automatically.</div>${LIVE.links.mlflow ? `<div class="links"><a href="${LIVE.links.mlflow.replace(/experiments\/\d+/, 'experiments')}" target="_blank">MLflow experiments</a></div>` : ''}`
       : LIVE && LIVE.kind === 'github' ? `<div class="big" style="font-size:26px">${r.fixed} changes undone on GitHub</div><div class="muted" style="font-size:13px;margin-bottom:8px">The poisoned note is quarantined; the merged exfiltration code was reverted on main and the open PR was closed. Legitimate merged work stays.</div>
         <div class="links"><a href="${LIVE.links.commits}" target="_blank">Revert commit on main</a><a href="${LIVE.links.repo}/pulls?q=is%3Apr+is%3Aclosed" target="_blank">Closed pull requests</a><a href="${LIVE.links.repo}" target="_blank">Repo</a></div>
         <div class="links">${LIVE.links.agent_events ? `<a href="${LIVE.links.agent_events}" target="_blank">Delta: agent events</a>` : ''}${LIVE.links.incidents ? `<a href="${LIVE.links.incidents}" target="_blank">Delta: incidents</a>` : ''}${LIVE.links.mlflow ? `<a href="${LIVE.links.mlflow}" target="_blank">MLflow: agent traces</a>` : ''}${LIVE.links.dashboard ? `<a href="${LIVE.links.dashboard}" target="_blank">AI/BI dashboard</a>` : ''}</div>`
@@ -541,7 +554,7 @@ function showReport(r){
     <div class="chain">Source: ${r.chain.map(esc).join(' ← ')}</div>
     <div class="metrics"><div class="metric"><div class="v">${(sp.agents_reached || []).length}</div><div class="l">agents reached</div></div><div class="metric"><div class="v">${r.proven}</div><div class="l">actions caused by the poison</div></div>
       <div class="metric"><div class="v">${r.cleared}</div><div class="l">cleared, left alone</div></div><div class="metric"><div class="v">${r.checklist}</div><div class="l">for a human to follow up</div></div></div>
-    ${r.score ? `<div class="callout green">${LIVE && LIVE.kind === 'github' ? 'Checked against every change that sent data to the attacker\'s host' : LIVE ? 'Checked against every action that carried the attacker\'s account' : 'Checked against the attack we planted'}: ${Math.round(r.score.precision*100)}% precision, ${Math.round(r.score.recall*100)}% recall.</div>` : ''}
+    ${r.score ? `<div class="callout green">${LIVE && LIVE.kind === 'import' ? 'Checked against every action that carried the flagged value' : LIVE && LIVE.kind === 'github' ? 'Checked against every change that sent data to the attacker\'s host' : LIVE ? 'Checked against every action that carried the attacker\'s account' : 'Checked against the attack we planted'}: ${Math.round(r.score.precision*100)}% precision, ${Math.round(r.score.recall*100)}% recall.</div>` : ''}
     ${LIVE && LIVE.links && LIVE.kind !== 'github' ? `<div class="links">${LIVE.links.payments ? `<a href="${LIVE.links.payments}" target="_blank">Delta: payments + change feed</a>` : ''}${LIVE.links.mlflow ? `<a href="${LIVE.links.mlflow}" target="_blank">MLflow: runs + agent traces</a>` : ''}${LIVE.links.dashboard ? `<a href="${LIVE.links.dashboard}" target="_blank">AI/BI incident dashboard</a>` : ''}</div>` : ''}
   </div>`);
   foot(`<button class="btn line" id="again">Try another scenario</button><button class="btn red" id="dl">Download report</button>`);
@@ -596,18 +609,19 @@ $('#liveRun').onclick = async () => {
 
 async function startLive(replay, kind = 'payments'){
   LIVE = {replay, kind}; const my = ++runId;
-  const GH = kind === 'github';
+  const GH = kind === 'github', IMP = kind === 'import';
   $('#picker').classList.remove('on'); setStage(1); verdict = null;
   if (cy){ cy.destroy(); cy = null; }
   $('#legend').innerHTML = ''; hint(replay ? 'Recorded live run · replaying' : 'Live run · real agents working');
-  head(GH ? `<div class="av" style="background:#9db8ff;color:#0a0c11">GH</div><div><div class="t">pz-demo-store · real GitHub</div><div class="s">Real coding agent through the Patient Zero MCP proxy</div></div><span class="chip live">${replay ? 'recorded' : 'live'}</span>`
+  head(IMP ? `<div class="av" style="background:#9b7bf0;color:#0a0c11">ML</div><div><div class="t">Imported from MLflow</div><div class="s">An existing agent's traces · no proxy, no code changes</div></div><span class="chip live">imported</span>`
+     : GH ? `<div class="av" style="background:#9db8ff;color:#0a0c11">GH</div><div><div class="t">pz-demo-store · real GitHub</div><div class="s">Real coding agent through the Patient Zero MCP proxy</div></div><span class="chip live">${replay ? 'recorded' : 'live'}</span>`
            : `<div class="av" style="background:var(--green);color:#06291b">H</div><div><div class="t">Halden Manufacturing · live</div><div class="s">Real agents on Databricks model serving · real TPC-H suppliers</div></div><span class="chip live">${replay ? 'recorded' : 'live'}</span>`);
   body(`<div class="kicker" style="color:var(--green)">The week, as it happens</div><h1>Agents at work</h1><div class="feed" id="lfeed"></div>`);
   foot(replay ? '<button class="btn line" id="faster">Speed up</button>' : '');
   let speed = 6;
   if (replay) $('#faster').onclick = () => { speed = 20; foot(''); };
-  const names = {ap_agent:'AP assistant', treasury_agent:'Treasury agent', vendor_agent:'Vendor-relations agent', system:'Nightly job', coding_agent:'Coding agent', release_bot:'Release bot'};
-  const colors = {ap_agent:ROLE_COLOR.primary, treasury_agent:ROLE_COLOR.reviewer, vendor_agent:ROLE_COLOR.notifier, coding_agent:ROLE_COLOR.primary, release_bot:ROLE_COLOR.reviewer};
+  const names = {support_agent:'Support agent', ap_agent:'AP assistant', treasury_agent:'Treasury agent', vendor_agent:'Vendor-relations agent', system:'Nightly job', coding_agent:'Coding agent', release_bot:'Release bot'};
+  const colors = {support_agent:ROLE_COLOR.primary, ap_agent:ROLE_COLOR.primary, treasury_agent:ROLE_COLOR.reviewer, vendor_agent:ROLE_COLOR.notifier, coding_agent:ROLE_COLOR.primary, release_bot:ROLE_COLOR.reviewer};
   const feed = html => { const f = $('#lfeed'); f.insertAdjacentHTML('beforeend', html); $('#sideBody').scrollTo({top:$('#sideBody').scrollHeight}); };
   const res = await fetch('/api/live/stream?speed=' + speed);
   const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '';
@@ -625,8 +639,9 @@ async function startLive(replay, kind = 'payments'){
       if (e.type === 'say' && GH) feed(`<div style="margin-left:14px;font-size:12.5px;border-left-color:#3a4258"><i>“${esc(e.text.slice(0, 220))}”</i></div>`);
       if (e.type === 'session_start' && e.agent !== 'system') feed(`<div style="border-left-color:${colors[e.agent] || '#555'}"><b>${esc(names[e.agent] || e.agent)}</b> · day ${e.day}: ${esc(e.task)}</div>`);
       if (e.type === 'tool'){
-        const bad = /BANK-99|northpeak-metrics/.test(JSON.stringify(e.args)) ? ';color:#ff8a96;border-left-color:var(--red)' : '';
+        const bad = /BANK-99|northpeak-metrics|ACCT.7731/.test(JSON.stringify(e.args)) ? ';color:#ff8a96;border-left-color:var(--red)' : '';
         const a = e.tool === 'create_item' || e.tool === 'change_value' ? (e.args.value || '') : e.tool === 'send_message' ? '“' + (e.args.body || '').slice(0, 90) + '…”' : e.tool === 'save_team_note' ? '“' + (e.args.text || '').slice(0, 90) + '”'
+                : e.tool === 'issue_refund' ? `order ${e.args.order_id} · $${e.args.amount} → ${e.args.destination}`
                 : e.tool === 'open_pull_request' ? `“${e.args.title}” · ${(e.args.files || []).join(', ')}${(e.args.hosts || []).length ? ' · ⚠ sends data to ' + e.args.hosts.join(', ') : ''}` : (e.args.item_id || e.args.id || '');
         feed(`<div style="margin-left:14px;font-family:var(--mono);font-size:12px${bad}">→ ${esc(e.tool)} ${esc(a)} <span class="muted">${esc(typeof e.result === 'string' ? e.result.slice(0, 40) : Array.isArray(e.result) ? e.result.length + ' items' : '')}</span></div>`);
       }
@@ -635,9 +650,11 @@ async function startLive(replay, kind = 'payments'){
     }
   }
   [OV, ALERTS, G] = await Promise.all([api('/api/overview'), api('/api/alerts'), api('/api/graph')]);
-  OV = GH ? {...OV, agents: {primary:['coding_agent','Coding agent','Resolves issues'], reviewer:['release_bot','Release bot','Merges PRs'], notifier:['notes','Team memory','Shared notes']}, company:'Northpeak (GitHub)'}
+  OV = IMP ? {...OV, agents: {primary:['support_agent','Support agent','Handles tickets'], reviewer:['reviewer','',''], notifier:['notifier','','']}, company:'Imported agent'}
+     : GH ? {...OV, agents: {primary:['coding_agent','Coding agent','Resolves issues'], reviewer:['release_bot','Release bot','Merges PRs'], notifier:['notes','Team memory','Shared notes']}, company:'Northpeak (GitHub)'}
           : {...OV, agents: {primary:['ap_agent','AP assistant','Schedules invoice payments'], reviewer:['treasury_agent','Treasury agent','Reviews the payment run'], notifier:['vendor_agent','Vendor-relations agent','Sends remittance advice']}, company:'Halden Manufacturing'};
-  LIVE.links = GH ? {...(await api('/api/github/links')), investigated: replay} : await api('/api/live/links');
+  LIVE.links = IMP ? {mlflow: (await api('/api/live/links')).mlflow, investigated: false}
+             : GH ? {...(await api('/api/github/links')), investigated: replay} : await api('/api/live/links');
   selected = (ALERTS[0] || {}).event_id;
   buildGraph(); cy.elements().removeClass('hidden'); cy.fit(undefined, 30);
   if (!ALERTS.length){ body('<h1>No alerts</h1><p>No payment went to an account outside the vendor master this time.</p>'); return; }
@@ -654,6 +671,13 @@ async function initGithub(){
   $('#ghReplay').onclick = async () => { await api('/api/github/load', {run_id: g.recorded.databricks}); startLive(true, 'github'); };
   $('#ghRun').onclick = async () => { try { await api('/api/github/start', {agent:'databricks'}); startLive(false, 'github'); } catch(e){ alert(e.message); } };
 }
+
+$('#mlfGo').onclick = async () => {
+  $('#mlfGo').disabled = true; $('#mlfNote').textContent = 'Reading traces from Databricks MLflow…';
+  try { await api('/api/import/mlflow', {experiment: $('#mlfExp').value.trim(), indicator: $('#mlfInd').value.trim()}); startLive(true, 'import'); }
+  catch(e){ $('#mlfNote').textContent = e.message; }
+  $('#mlfGo').disabled = false;
+};
 
 initLive();
 initGithub();

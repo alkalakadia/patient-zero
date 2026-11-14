@@ -12,10 +12,11 @@ ACTION_TYPES = ("tool_call", "memory_write")
 
 
 class Engine:
-    def __init__(self, store, brain=None):
+    def __init__(self, store, brain=None, evidence=None):
         import re
         from .sim import scenario_of
         self.s, self.brain = store, brain
+        self.evidence = evidence  # trace-only mode: cause is shown by this value appearing in source and action
         self.value_re = re.compile(scenario_of(store)["value_re"])
         self._build_graph()
 
@@ -86,6 +87,13 @@ class Engine:
         for obj, evs in explains.items():
             # counterfactual root test: hide the object, cascade down the chain (a memory on the path is
             # hidden only if its writer would not have written it without the object), then replay the bad session
+            if self.evidence is not None:
+                from .mlflow_import import _norm
+                candidates.append({
+                    "object_id": obj, "kind": self.kb[obj]["kind"], "source": self.kb[obj]["source"], "text": self.kb[obj]["text"],
+                    "explains": len(evs), "of": len(event_ids), "exposed_sessions": len(self._exposed_sessions(obj)),
+                    "confirmed": self.evidence in _norm(self.kb[obj]["text"]), "path": paths[(obj, sorted(evs)[0])], "by": "evidence"})
+                continue
             probe = sorted(evs)[0]
             hidden = {obj}
             for mem in reversed([n for n in paths[(obj, probe)] if self.kb.get(n, {}).get("kind") == "memory"]):
@@ -173,6 +181,10 @@ class Engine:
     # ---------- verify ----------
     def verify(self, root):
         fwd = self.trace_forward(root)
+        if self.evidence is not None:  # no replay hook: classify exposed actions by evidence
+            from .mlflow_import import _norm
+            conf = [e for e in fwd["suspects"] if self.evidence in _norm(self.event[e]["payload"])]
+            return {**fwd, "confirmed": conf, "cleared": [e for e in fwd["suspects"] if e not in conf], "corrections": {}, "by": "evidence"}
         hidden = {root} | set(fwd["memories"])
         confirmed, cleared, corrections = [], [], {}
         for sid in fwd["sessions"]:
