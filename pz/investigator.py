@@ -105,6 +105,10 @@ class Toolbox:
             return {"error": "not approved by a human"}, None
         if getattr(self, "github", None):
             res = self.github.apply(self.plan["github"])
+            if self.delta:  # the incident lands in the lakehouse next to payment incidents
+                self.delta.record_incident("github", root, len(self.verdict["confirmed"]), len(self.verdict["cleared"]),
+                                           sum(1 for d in res["done"] if d["result"] in ("reverted", "closed")),
+                                           json.dumps([{"title": d["title"], "result": d["result"], "url": d.get("url")} for d in res["done"]]))
             return {"github": [f"{d['result']}: {d['title']}" for d in res["done"]], "quarantined": res["quarantined"],
                     "rows_fixed": sum(1 for d in res["done"] if d["result"] in ("reverted", "closed"))}, {**res, "reverted": [], "checklist": []}
         result = self.e.clean(self.verdict)

@@ -27,7 +27,7 @@ def _table(name, ds, cols, title, x, y, w=6, h=7):
 
 def spec():
     datasets = [
-        _ds("incidents", "Incidents", f"SELECT run_id, root, proven, cleared, rows_fixed, created_at FROM {S}.incidents ORDER BY created_at DESC"),
+        _ds("incidents", "Incidents", f"SELECT coalesce(kind, 'payments') AS kind, run_id, root, proven, cleared, rows_fixed, detail, created_at FROM {S}.incidents ORDER BY created_at DESC"),
         _ds("totals", "Totals", f"SELECT count(*) AS incidents, coalesce(sum(proven),0) AS actions_proven, coalesce(sum(rows_fixed),0) AS rows_fixed FROM {S}.incidents"),
         _ds("cdf", "Cleanup change feed", f"SELECT item_id, value, status, _change_type, _commit_version, _commit_timestamp FROM table_changes('{S}.payments', 1) "
                                           "WHERE _change_type IN ('update_preimage','update_postimage') ORDER BY _commit_version DESC LIMIT 200"),
@@ -38,8 +38,8 @@ def spec():
          "position": {"x": 0, "y": 0, "width": 6, "height": 2}},
         _counter("c1", "totals", "incidents", "Incidents", 0, 2),
         _counter("c2", "totals", "actions_proven", "Agent actions proven caused by poison", 2, 2),
-        _counter("c3", "totals", "rows_fixed", "Rows fixed in Delta", 4, 2),
-        _table("t1", "incidents", ["run_id", "root", "proven", "cleared", "rows_fixed", "created_at"], "Incidents", 0, 5),
+        _counter("c3", "totals", "rows_fixed", "Changes undone (Delta rows + GitHub)", 4, 2),
+        _table("t1", "incidents", ["kind", "run_id", "root", "proven", "rows_fixed", "detail", "created_at"], "Incidents (payments and GitHub)", 0, 5),
         _table("t2", "cdf", ["item_id", "value", "status", "_change_type", "_commit_version", "_commit_timestamp"], "Change Data Feed: payments", 0, 12),
         _table("t3", "events", ["run_id", "agent_id", "tool", "actions"], "Agent activity by tool", 0, 19),
     ]

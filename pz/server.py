@@ -221,7 +221,24 @@ def live_start(req: LiveReq):
 @app.get("/api/github/links")
 def gh_links():
     from .github_run import github_links
-    return github_links(state["store"])
+    out = github_links(state["store"])
+    if databricks.available():
+        base = databricks.workspace_url().rstrip("/")
+        out["agent_events"] = f"{base}/explore/data/workspace/patient_zero/agent_events"
+        out["incidents"] = f"{base}/explore/data/workspace/patient_zero/incidents"
+        try:
+            from . import tracking
+            out["mlflow"] = tracking.experiment_url()
+        except Exception:
+            pass
+        if "dashboard_url" not in state:
+            try:
+                from . import dashboard
+                state["dashboard_url"] = dashboard.ensure()
+            except Exception:
+                state["dashboard_url"] = None
+        out["dashboard"] = state["dashboard_url"]
+    return out
 
 
 @app.get("/api/live/links")
@@ -412,6 +429,7 @@ async def investigate(event_ids: str, mode: str = "auto"):
     if state.get("github"):
         from .github_run import GithubCleanup
         tb.github = GithubCleanup(state["store"])
+        tb.delta = getattr(state.get("live"), "delta", None)
     run = state.get("live")
     if run and state.get("adopted") == run.id and run.delta:
         tb.delta = run.delta

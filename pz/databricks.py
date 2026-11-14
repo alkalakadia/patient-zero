@@ -67,14 +67,14 @@ class Delta:
                 cur.close()
 
     # ---------- setup + real data ----------
-    def setup(self, run_id):
+    def setup(self, run_id, reset_payments=True):
         self.run_id = run_id
         self.sql(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
         self.sql(f"CREATE TABLE IF NOT EXISTS {SCHEMA}.agent_events (run_id STRING, event_id STRING, session_id STRING, agent_id STRING, "
                  "ts BIGINT, type STRING, object_id STRING, tool STRING, row_key STRING, reversible BOOLEAN, payload STRING)")
         self.sql(f"CREATE TABLE IF NOT EXISTS {SCHEMA}.knowledge (run_id STRING, object_id STRING, kind STRING, source STRING, "
                  "created_ts BIGINT, status STRING, text STRING)")
-        self.sql(f"CREATE OR REPLACE TABLE {SCHEMA}.payments (item_id STRING, entity_id STRING, category STRING, amount DOUBLE, "
+        self.sql(f"CREATE {'OR REPLACE' if reset_payments else ''} TABLE {'' if reset_payments else 'IF NOT EXISTS '}{SCHEMA}.payments (item_id STRING, entity_id STRING, category STRING, amount DOUBLE, "
                  "value STRING, status STRING) TBLPROPERTIES (delta.enableChangeDataFeed = true)")
         self.sql(f"CREATE TABLE IF NOT EXISTS {SCHEMA}.edges (run_id STRING, src STRING, dst STRING, type STRING, ts BIGINT)")
         self.versions = []  # (session ts, payments table version after that session) -> time travel for replays
@@ -99,8 +99,21 @@ class Delta:
         ts = store.one("SELECT ts FROM sessions WHERE session_id=?", (session_id,))["ts"]
         self.q.put(("session", events, changes, (kb, ts)))
 
-    def push_kb(self, store):
-        self.q.put(("kb", store.q("SELECT * FROM kb"), None, None))
+    def push_kb(self, store, created_by=None):
+        rows = store.q("SELECT * FROM kb WHERE created_by_session=?", (created_by,)) if created_by else store.q("SELECT * FROM kb")
+        self.q.put(("kb", rows, None, None))
+
+    def record_incident(self, kind, root, proven, cleared, fixed, detail):
+        """One row per incident, whatever system the damage was in (payments, GitHub, ...)."""
+        self.flush()
+        for col in ("kind", "detail"):
+            try:
+                self.sql(f"ALTER TABLE {SCHEMA}.incidents ADD COLUMNS ({col} STRING)")
+            except Exception:
+                pass  # column already there
+        self.sql(f"INSERT INTO {SCHEMA}.incidents (run_id, root, proven, cleared, rows_fixed, created_at, kind, detail) "
+                 "VALUES (:r,:root,:p,:c,:f,current_timestamp(),:k,:d)",
+                 {"r": self.run_id, "root": root, "p": proven, "c": cleared, "f": fixed, "k": kind, "d": detail[:2000]})
 
     def flush(self, timeout=120):
         done = threading.Event()

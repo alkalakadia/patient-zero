@@ -107,6 +107,7 @@ class GithubRun:
         self.store.db.execute("INSERT INTO meta VALUES ('scenario', 'github_live'), ('agent', ?)", (agent,))
         self.store.commit()
         self.events, self.done, self.error, self.cost = [], False, None, 0.0
+        self.delta, self.mlflow_run_id = None, None
         self.t0 = time.time()
 
     def emit(self, ev):
@@ -130,8 +131,15 @@ class GithubRun:
             if getattr(self, "reset_first", False):
                 self.emit({"type": "phase", "text": "Resetting the sandbox repo to its first commit with a fresh issue backlog"})
                 reset_repo()
+            from . import databricks
+            if databricks.available():
+                self.emit({"type": "phase", "text": "Connecting to Databricks: every read, note, PR and merge streams into Delta"})
+                self.delta = databricks.Delta()
+                self.delta.setup(self.id, reset_payments=False)
             if self.attack_text:
                 self.plant(self.attack_text)
+                if self.delta:
+                    self.delta.push_session(self.store, "s0")
             issues = sorted(json.loads(gh("issue", "list", "--repo", REPO, "--state", "open", "--json", "number,title")), key=lambda i: i["number"])
             who = f"Claude Code ({MODEL})" if self.agent == "claude-code" else "An open-model agent (GPT-OSS 120B on Databricks model serving)"
             self.emit({"type": "phase", "text": f"{who} will work {len(issues)} open issues in {REPO} through the Patient Zero MCP proxy",
@@ -144,7 +152,21 @@ class GithubRun:
                 result, _ = run_agent(self.agent, self.db, sid, ts, task)
                 self.cost += result.get("total_cost_usd", 0) or 0
                 self._emit_session(sid, result.get("result", ""))
+                if self.delta:
+                    self.delta.push_session(self.store, sid)
             self._merge_all(len(issues))
+            if self.delta:
+                self.delta.push_session(self.store, f"s1{len(issues):02d}")
+                self.delta.push_kb(self.store, created_by="github")  # the issues the agents read
+                self.emit({"type": "phase", "text": "Syncing to Delta and logging the run to MLflow (one trace per agent session)"})
+                self.delta.flush()
+                try:
+                    from . import tracking
+                    tracking.log_github(self)
+                    self.emit({"type": "mlflow", "url": tracking.experiment_url(), "run_id": self.mlflow_run_id})
+                except Exception as ex:
+                    self.emit({"type": "phase", "text": f"MLflow logging skipped: {str(ex)[:120]}"})
+                self.store.db.execute("INSERT OR REPLACE INTO meta VALUES ('mlflow_run_id', ?)", (self.mlflow_run_id or "",))
             self.emit({"type": "finished", "cost": round(self.cost, 4)})
             self.store.db.execute("INSERT OR REPLACE INTO meta VALUES ('events', ?)", (json.dumps(self.events),))
             self.store.commit()
@@ -285,7 +307,30 @@ def load_run(run_id):
     run.investigation = json.loads(meta("investigation")) if meta("investigation") else None
     run.verdict = json.loads(meta("verdict")) if meta("verdict") else None
     run.done, run.error, run.attack_text, run.cost = True, None, None, 0.0
+    run.mlflow_run_id = meta("mlflow_run_id") or None
+    run.delta = None
+    from . import databricks
+    if databricks.available() and meta("delta_synced"):
+        run.delta = databricks.Delta()
+        run.delta.run_id, run.delta.versions, run.delta.base_version = run_id, [], 0
     return run
+
+
+def sync_recorded(run_id):
+    """Backfill a run recorded before the Databricks sync existed: Delta tables, edges, MLflow run, incident row."""
+    from . import databricks, tracking
+    run = load_run(run_id)
+    d = databricks.Delta()
+    d.setup(run_id, reset_payments=False)
+    for sid in [r["session_id"] for r in run.store.q("SELECT session_id FROM sessions ORDER BY ts")]:
+        d.push_session(run.store, sid)
+    d.push_kb(run.store, created_by="github")
+    d.flush()
+    run.delta = d
+    tracking.log_github(run)
+    run.store.db.execute("INSERT OR REPLACE INTO meta VALUES ('mlflow_run_id', ?), ('delta_synced', '1')", (run.mlflow_run_id,))
+    run.store.commit()
+    return run, d
 
 
 def github_links(store):
