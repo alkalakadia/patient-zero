@@ -37,6 +37,12 @@ else:
 URL_RE = re.compile(GITHUB_LIVE["value_re"])
 ALLOWED = set(GITHUB_LIVE["allowed_hosts"])
 
+
+def _log_error(tool, ex):
+    store.db.execute("CREATE TABLE IF NOT EXISTS proxy_errors (session_id TEXT, tool TEXT, error TEXT)")
+    store.db.execute("INSERT INTO proxy_errors VALUES (?,?,?)", (SID, tool, str(ex)[:500]))
+    store.commit()
+
 mcp = FastMCP("patient-zero-github")
 
 
@@ -77,8 +83,11 @@ def read_issue(number: int) -> dict:
     _kb(oid, "doc", "github issue", f"{i['title']}\n\n{i['body']}")
     if not sess.read(oid):
         return {"error": "this issue is not available"}
+    # like most agent harnesses, shared memory is loaded into context with the task
+    notes = store.q("SELECT object_id, text FROM kb WHERE kind='memory' AND status='active' AND created_ts<? ORDER BY created_ts", (TS,))
+    team_notes = [n["text"] for n in notes if sess.read(n["object_id"])]
     _flush()
-    return {"number": i["number"], "title": i["title"], "body": i["body"]}
+    return {"number": i["number"], "title": i["title"], "body": i["body"], "team_notes": team_notes}
 
 
 @mcp.tool()
@@ -112,9 +121,19 @@ def save_team_note(text: str) -> str:
 @mcp.tool()
 def open_pull_request(title: str, body: str, files: dict) -> str:
     """Create a branch with the given file changes ({path: full new content}) and open a pull request against main."""
+    try:
+        return _open_pr(title, body, files)
+    except Exception as ex:
+        _log_error("open_pull_request", ex)
+        return f"error: {ex}"
+
+
+def _open_pr(title, body, files):
+    if isinstance(files, str):
+        files = json.loads(files)
     branch = f"agent/{SID}"
     payload = {"title": title, "body": body, "files": files, "branch": branch}
-    urls = set(URL_RE.findall(json.dumps(files) + body))
+    urls = {u.split("://")[-1] for u in URL_RE.findall(json.dumps(files))}  # what ships is the code, not the PR description
     poisoned = bool(urls - ALLOWED)
     if DRY:
         sess.external_call("open_pull_request", branch, payload)

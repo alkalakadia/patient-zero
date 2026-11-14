@@ -100,7 +100,9 @@ class Engine:
                 "confirmed": changed, "path": paths[(obj, probe)],
             })
         # patient zero is the most upstream object whose removal changes the outcome
-        candidates.sort(key=lambda c: (not c["confirmed"], self.kb[c["object_id"]]["created_ts"], -c["explains"]))
+        # patient zero: confirmed, explains the most flagged actions (an agent's own task input explains only its own),
+        # then the most upstream
+        candidates.sort(key=lambda c: (not c["confirmed"], -c["explains"], self.kb[c["object_id"]]["created_ts"]))
         return candidates
 
     def _derived_memories(self, root):

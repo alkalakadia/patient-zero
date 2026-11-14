@@ -80,6 +80,16 @@ class Toolbox:
         return out, {**v, "score": s}
 
     def plan_cleanup(self, root):
+        if getattr(self, "github", None):
+            if not self.verdict or self.verdict["root"] != root:
+                return {"error": "run replay_sessions first"}, None
+            plan = self.github.plan(self.verdict)
+            self.plan = {"github": plan, "checklist": [], "reverted": [], "quarantined": plan["quarantine"]}
+            return {"quarantine": plan["quarantine"],
+                    "github_actions": [f"{a['do']}: {a['title']}" for a in plan["actions"]],
+                    "legit_changes_kept": [k["title"] for k in plan["keep"]],
+                    "rows_to_fix": len(plan["actions"]), "irreversible_for_human_checklist": 0,
+                    "legit_changes_a_point_in_time_restore_would_destroy": len(plan["reset_would_lose"])}, self.plan
         if not self.verdict or self.verdict["root"] != root:
             return {"error": "run replay_sessions first"}, None
         plan = self.e.clean(self.verdict, apply=False)
@@ -93,6 +103,10 @@ class Toolbox:
     def apply_cleanup(self, root, approved):
         if not approved:
             return {"error": "not approved by a human"}, None
+        if getattr(self, "github", None):
+            res = self.github.apply(self.plan["github"])
+            return {"github": [f"{d['result']}: {d['title']}" for d in res["done"]], "quarantined": res["quarantined"],
+                    "rows_fixed": sum(1 for d in res["done"] if d["result"] in ("reverted", "closed"))}, {**res, "reverted": [], "checklist": []}
         result = self.e.clean(self.verdict)
         out = {"rows_fixed": len(result["reverted"]), "quarantined": result["quarantined"], "checklist": len(result["checklist"])}
         if self.on_cleanup:
