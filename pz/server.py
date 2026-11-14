@@ -17,6 +17,21 @@ from .scenarios import DEFAULT, SCENARIOS, fmt_amount
 from .sim import attack_defaults, build
 
 WEB = Path(__file__).resolve().parent.parent / "web"
+
+
+def _restore_recordings():
+    """Recorded demo runs ship in recordings/; the app reads them from data/ (git-ignored)."""
+    import shutil
+    rec, data = WEB.parent / "recordings", WEB.parent / "data"
+    data.mkdir(exist_ok=True)
+    for f in rec.glob("*.db"):
+        run_id = f.stem.split("_")[-1]
+        name = ("gh_" if "github" in f.stem else "live_") + run_id + ".db"
+        if not (data / name).exists():
+            shutil.copy(f, data / name)
+
+
+_restore_recordings()
 app = FastAPI(title="Patient Zero")
 state = {}
 
