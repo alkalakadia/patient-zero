@@ -6,6 +6,8 @@ which knowledge-base objects were in an agent's context when it acted.
 import json
 import itertools
 
+COLS = "(object_id,kind,topic,text,source,visible_to,created_ts,created_by_session)"
+
 
 class Recorder:
     def __init__(self, store):
@@ -45,10 +47,18 @@ class Session:
         topics = [topics] if isinstance(topics, str) else list(topics)
         marks = ",".join("?" * len(topics))
         rows = self.s.q(
-            f"SELECT * FROM kb WHERE status='active' AND topic IN ({marks}) AND created_ts<? "
+            f"SELECT * FROM kb WHERE status='active' AND topic IN ({marks}) AND created_ts<? AND (retired_ts IS NULL OR retired_ts>?) "
             "AND (visible_to='*' OR instr(visible_to, ?)>0) ORDER BY created_ts DESC",
-            (*topics, self.ts, self.agent),
+            (*topics, self.ts, self.ts, self.agent),
         )
+        # counterfactual: hiding an edit means the agent would have seen the version it replaced
+        if self.exclude:
+            ex = list(self.exclude)
+            restored = [r["supersedes"] for r in self.s.q(
+                f"SELECT supersedes FROM kb WHERE supersedes IS NOT NULL AND object_id IN ({','.join('?' * len(ex))})", ex)]
+            if restored:
+                rows += self.s.q(f"SELECT * FROM kb WHERE object_id IN ({','.join('?' * len(restored))}) AND topic IN ({marks})",
+                                 (*restored, *topics))
         rows = [r for r in rows if r["object_id"] not in self.exclude][:k]
         for r in rows:
             self.context.append(r["object_id"])
@@ -76,7 +86,7 @@ class Session:
         if self.dry_run:
             return None
         self.s.db.execute(
-            "INSERT INTO kb VALUES (?,?,?,?,?,?,?,?, 'active')",
+            "INSERT INTO kb (object_id,kind,topic,text,source,visible_to,created_ts,created_by_session) VALUES (?,?,?,?,?,?,?,?)",
             (object_id, "memory", topic, text, source, visible_to, self.ts, self.id),
         )
         eid = self._event(type="memory_write", object_id=object_id, payload={"text": text, "derived_from": self.context})
@@ -84,9 +94,18 @@ class Session:
             self.s.db.execute("INSERT INTO ground_truth VALUES (?,?)", (eid, int(poisoned)))
         return eid
 
+    def kb_edit(self, old_id, new_id, text, source):
+        """A page edit: the new version replaces the old one from this moment on (the old one stays for time travel)."""
+        old = self.s.one("SELECT * FROM kb WHERE object_id=?", (old_id,))
+        self.s.db.execute("UPDATE kb SET retired_ts=? WHERE object_id=?", (self.ts, old_id))
+        self.s.db.execute(f"INSERT INTO kb {COLS} VALUES (?,?,?,?,?,?,?,?)",
+                          (new_id, "doc", old["topic"], text, source, old["visible_to"], self.ts, self.id))
+        self.s.db.execute("UPDATE kb SET supersedes=? WHERE object_id=?", (old_id, new_id))
+        return self._event(type="kb_ingest", object_id=new_id, payload={"source": source, "edit_of": old_id})
+
     def kb_ingest(self, object_id, topic, text, source, visible_to="*"):
         self.s.db.execute(
-            "INSERT INTO kb VALUES (?,?,?,?,?,?,?,?, 'active')",
+            "INSERT INTO kb (object_id,kind,topic,text,source,visible_to,created_ts,created_by_session) VALUES (?,?,?,?,?,?,?,?)",
             (object_id, "doc", topic, text, source, visible_to, self.ts, self.id),
         )
         return self._event(type="kb_ingest", object_id=object_id, payload={"source": source})

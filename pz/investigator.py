@@ -17,7 +17,7 @@ import os
 
 from .scenarios import fmt_amount
 
-MODEL = "claude-opus-5-5"
+from .claude_brain import MODEL  # same model as the business agents
 
 
 class Toolbox:
@@ -27,6 +27,7 @@ class Toolbox:
         self.e, self.sc, self.label, self.agent_name = engine, sc, label, agent_name
         self.verdict = None
         self.plan = None
+        self.on_cleanup = None  # optional hook: apply the same cleanup in the system of record (Delta)
 
     def _line(self, eid):
         return self.label(eid)
@@ -74,8 +75,11 @@ class Toolbox:
         if not approved:
             return {"error": "not approved by a human"}, None
         result = self.e.clean(self.verdict)
-        return {"rows_fixed": len(result["reverted"]), "quarantined": result["quarantined"],
-                "checklist": len(result["checklist"])}, result
+        out = {"rows_fixed": len(result["reverted"]), "quarantined": result["quarantined"], "checklist": len(result["checklist"])}
+        if self.on_cleanup:
+            result["delta"] = self.on_cleanup(result)
+            out["delta_change_feed_rows"] = len(result["delta"]["changes"])
+        return out, result
 
 
 # ---------------------------------------------------------------- scripted driver
@@ -191,7 +195,9 @@ TOOLS = [
 
 
 def claude_available():
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    from pathlib import Path
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+                or any((Path.home() / ".config/anthropic/credentials").glob("*.json")))
 
 
 def claude(tb, alert_ids):
@@ -203,10 +209,9 @@ def claude(tb, alert_ids):
     approved, root, tr = False, None, None
     state = {}
     for _ in range(20):
-        resp = client.beta.messages.create(
+        resp = client.messages.create(
             model=MODEL, max_tokens=16000, system=SYSTEM, tools=TOOLS, messages=messages,
             thinking={"type": "adaptive"}, output_config={"effort": "medium"},
-            betas=["server-side-fallback-2026-07-01"], fallbacks="default",
         )
         if resp.stop_reason == "refusal":
             yield {"type": "error", "text": "The model declined this request."}

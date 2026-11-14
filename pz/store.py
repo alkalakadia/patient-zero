@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS kb (
   visible_to TEXT,      -- comma list of agent ids, or *
   created_ts INTEGER,
   created_by_session TEXT,
-  status TEXT DEFAULT 'active'   -- active | quarantined | superseded
+  status TEXT DEFAULT 'active',  -- active | quarantined
+  retired_ts INTEGER,            -- set when a newer version replaced this one (time travel for retrieval)
+  supersedes TEXT                -- object_id of the version this one replaced (a page edit)
 );
 CREATE TABLE IF NOT EXISTS sessions (
   session_id TEXT PRIMARY KEY,

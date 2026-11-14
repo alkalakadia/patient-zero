@@ -9,7 +9,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import investigator
+from . import databricks, investigator
+from .claude_brain import ClaudeBrain
+from .live import ATTACK_TEMPLATE, LiveRun
 from .engine import Engine
 from .scenarios import DEFAULT, SCENARIOS, fmt_amount
 from .sim import attack_defaults, build
@@ -20,9 +22,12 @@ state = {}
 
 
 def load(scenario=DEFAULT, attack=None):
+    live = state.get("live")
+    state.clear()
+    if live:
+        state["live"] = live
     sc = SCENARIOS[scenario]
     store = build(scenario=scenario, attack=attack)
-    state.clear()
     state.update(store=store, engine=Engine(store), scenario=scenario, sc=sc,
                  attack={**attack_defaults(sc), **(attack or {})}, verdict=None, approval=None)
 
@@ -161,6 +166,61 @@ def graph():
     return {"nodes": nodes, "edges": edges}
 
 
+# ---------------- live mode: real Claude agents, real Databricks data ----------------
+
+class LiveReq(BaseModel):
+    attack_text: str | None = None
+    use_databricks: bool = True
+
+
+@app.get("/api/live/defaults")
+def live_defaults():
+    sc = SCENARIOS["inbox"]
+    return {"original_policy": sc["seed_docs"][0][2], "attack_template": ATTACK_TEMPLATE, "company": sc["company"],
+            "agents": sc["agents"], "databricks": databricks.available(), "claude": investigator.claude_available(),
+            "real": sc["real"]}
+
+
+@app.post("/api/live/start")
+def live_start(req: LiveReq):
+    if state.get("live") and not state["live"].done:
+        raise HTTPException(409, "a live run is already in progress")
+    text = (req.attack_text or "").strip() or None
+    run = LiveRun(attack_text=text, use_databricks=req.use_databricks).start()
+    state["live"] = run
+    return {"run_id": run.id, "databricks": run.use_databricks}
+
+
+@app.get("/api/live/stream")
+async def live_stream():
+    run = state.get("live")
+    if not run:
+        raise HTTPException(404, "no live run")
+
+    async def stream():
+        i = 0
+        while True:
+            while i < len(run.events):
+                yield _sse(run.events[i])
+                i += 1
+            if run.done and i >= len(run.events):
+                break
+            await asyncio.sleep(0.25)
+        if not run.error:
+            _adopt_live(run)
+            yield _sse({"type": "ready", "attacker_value": run.attacker_value})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+def _adopt_live(run):
+    """Point the API at the live run's data; replays use the same real Claude agents."""
+    if state.get("adopted") == run.id:
+        return
+    state.update(store=run.store, engine=Engine(run.store, brain=ClaudeBrain(run.sc)), scenario="inbox", sc=run.sc,
+                 attack={"value": run.attacker_value}, verdict=None, approval=None, adopted=run.id)
+
+
 # ---------------- the investigator agent (server-sent events) ----------------
 
 class ApproveReq(BaseModel):
@@ -174,6 +234,12 @@ async def investigate(event_ids: str, mode: str = "auto"):
     if not ids or any(e not in eng.event for e in ids):
         raise HTTPException(404, "unknown event")
     tb = investigator.Toolbox(eng, state["sc"], label, agent_name)
+    run = state.get("live")
+    if run and state.get("adopted") == run.id and run.delta:
+        tb.on_cleanup = lambda result: {**run.delta.apply_cleanup(result["reverted"], {"root": result["quarantined"][0] if result["quarantined"] else "",
+                                                                                      "proven": len(tb.verdict["confirmed"]),
+                                                                                      "cleared": len(tb.verdict["cleared"])}),
+                                        "link": run.delta.table_link("payments")}
     use_claude = mode == "claude" or (mode == "auto" and investigator.claude_available())
     gen = (investigator.claude if use_claude else investigator.scripted)(tb, ids)
 
@@ -246,7 +312,7 @@ def _ui_data(name, data):
     if name == "plan_cleanup":
         return {"quarantined": data["quarantined"]}
     if name == "apply_cleanup":
-        return {"quarantined": data["quarantined"], "rows": _plan_rows(data)}
+        return {"quarantined": data["quarantined"], "rows": _plan_rows(data), "delta": data.get("delta")}
     return None
 
 

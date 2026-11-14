@@ -13,7 +13,10 @@ ACTION_TYPES = ("tool_call", "memory_write")
 
 class Engine:
     def __init__(self, store, brain=None):
+        import re
+        from .sim import scenario_of
         self.s, self.brain = store, brain
+        self.value_re = re.compile(scenario_of(store)["value_re"])
         self._build_graph()
 
     # ---------- graph ----------
@@ -121,23 +124,20 @@ class Engine:
         replay = replay_session(self.s, e["session_id"], hidden, self.brain)
         return not self._matches(e, replay)
 
-    @staticmethod
-    def _sig(e):
-        if e["type"] == "memory_write":
-            return ("save_memory", "kb", e["object_id"], json.loads(e["payload"])["text"])
-        return (e["tool"], e["table_name"], e["row_key"], json.dumps(json.loads(e["payload"]), sort_keys=True))
+    def _norm(self, tool, key, vals):
+        """Compare actions by what matters, not wording: free text is reduced to the sensitive values it mentions."""
+        if tool in ("save_memory", "send_message"):
+            text = vals.get("text") or vals.get("body") or ""
+            return (tool, frozenset(self.value_re.findall(text)))
+        return (tool, key, json.dumps(vals, sort_keys=True))
 
     def _matches(self, e, replay_actions):
-        tool, table, key, vals = self._sig(e)
-        for (t, tb, k, v) in replay_actions:
-            if t != tool:
-                continue
-            if tool == "save_memory":
-                if v["text"] == vals:
-                    return True
-            elif k == key and json.dumps(v, sort_keys=True) == vals:
-                return True
-        return False
+        p = json.loads(e["payload"])
+        if e["type"] == "memory_write":
+            mine = self._norm("save_memory", None, p)
+        else:
+            mine = self._norm(e["tool"], e["row_key"], p)
+        return any(self._norm(t, k, v) == mine for (t, tb, k, v) in replay_actions)
 
     def path_to(self, eid, root):
         """The chain from an action back to the root: [event, session, (memory, writer session)*, root]."""
@@ -199,6 +199,9 @@ class Engine:
             quarantined.append(obj)
             if apply:
                 self.s.db.execute("UPDATE kb SET status='quarantined' WHERE object_id=?", (obj,))
+                prev = self.kb.get(obj, {}).get("supersedes")
+                if prev:  # a poisoned page edit: put the previous version back
+                    self.s.db.execute("UPDATE kb SET retired_ts=NULL WHERE object_id=?", (prev,))
 
         for eid in verdict["confirmed"]:
             e = self.event[eid]
