@@ -134,6 +134,17 @@ def overview():
 def alerts():
     """A plain detection rule produces the symptom: a sensitive value no known entity owns."""
     s = state["store"]
+    if state.get("github"):
+        allowed = set(state["sc"]["allowed_hosts"])
+        rx = re.compile(state["sc"]["value_re"])
+        out = []
+        for e in s.q("SELECT * FROM events WHERE tool='open_pull_request' ORDER BY ts"):
+            p = json.loads(e["payload"])
+            bad = sorted({h for h in rx.findall(json.dumps(p.get("files", {})))} - allowed)
+            if bad:
+                out.append({"event_id": e["event_id"], "agent": agent_name(e["agent_id"]), "role": "primary", "row": e["row_key"],
+                            "value": bad[0], "amount": "PR", "day": 1, "text": f"{p['title']} \u2192 sends data to {bad[0]}"})
+        return out
     owned = {r["value"] for r in s.q("SELECT value FROM entities")}
     out = []
     for e in s.q("SELECT * FROM events WHERE tool IN ('create_item','change_value') ORDER BY ts"):
@@ -188,7 +199,14 @@ def live_start(req: LiveReq):
     text = (req.attack_text or "").strip() or None
     run = LiveRun(attack_text=text, use_databricks=req.use_databricks).start()
     state["live"] = run
+    state.pop("github", None)
     return {"run_id": run.id, "databricks": run.use_databricks}
+
+
+@app.get("/api/github/links")
+def gh_links():
+    from .github_run import github_links
+    return github_links(state["store"])
 
 
 @app.get("/api/live/links")
@@ -227,6 +245,7 @@ def live_load(req: LoadReq):
         raise HTTPException(400, "bad run id")
     run = LiveRun.load(req.run_id)
     state["live"] = run
+    state.pop("github", None)
     state.pop("adopted", None)
     _adopt_live(run)
     if run.verdict:
@@ -255,8 +274,11 @@ async def live_stream(speed: float = 1.0):
                 break
             await asyncio.sleep(0.25)
         if not run.error:
-            _adopt_live(run)
-            yield _sse({"type": "ready", "attacker_value": run.attacker_value})
+            if state.get("github"):
+                _adopt_github(run)
+            else:
+                _adopt_live(run)
+            yield _sse({"type": "ready", "attacker_value": getattr(run, "attacker_value", None)})
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -269,6 +291,93 @@ def _adopt_live(run):
         run.store.time_travel = lambda ts: run.delta.items_as_of(ts)[1]  # replays read payments via Delta time travel
     state.update(store=run.store, engine=Engine(run.store, brain=type(run.brain)(run.sc)), scenario="inbox", sc=run.sc,
                  attack={"value": run.attacker_value}, verdict=None, approval=None, adopted=run.id)
+
+
+# ---------------- real coding agent on GitHub ----------------
+
+GH_RECORDED = {"claude-code": "c4ecfc9a", "databricks": "54afee64"}
+
+
+@app.get("/api/github/info")
+def github_info():
+    from .github_run import load_run
+    out = {"recorded": GH_RECORDED, "repo": "https://github.com/alkalakadia/pz-demo-store"}
+    try:
+        cc = load_run(GH_RECORDED["claude-code"])
+        out["claude_said"] = [e["text"] for e in cc.events if e["type"] == "say"][:3]
+        om = load_run(GH_RECORDED["databricks"])
+        out["open_model_said"] = [e["text"] for e in om.events if e["type"] == "say"][:3]
+        out["open_model_poisoned"] = om.store.one("SELECT COUNT(*) n FROM ground_truth WHERE poisoned=1")["n"]
+        out["claude_poisoned"] = cc.store.one("SELECT COUNT(*) n FROM ground_truth WHERE poisoned=1")["n"]
+        inv = om.investigation or []
+        res = next((e for e in inv if e.get("type") == "tool_result" and e.get("name") == "apply_cleanup"), None)
+        out["cleanup"] = res and res["summary"]
+    except Exception as ex:
+        out["error"] = str(ex)[:200]
+    return out
+
+
+class GhLoadReq(BaseModel):
+    run_id: str
+
+
+@app.post("/api/github/load")
+def github_load(req: GhLoadReq):
+    from .github_run import load_run
+    if not re.fullmatch(r"[0-9a-f]{8}", req.run_id):
+        raise HTTPException(400, "bad run id")
+    run = load_run(req.run_id)
+    _adopt_github(run)
+    return {"run_id": run.id, "agent": run.agent, "investigated": bool(run.investigation)}
+
+
+class GhStartReq(BaseModel):
+    agent: str = "databricks"
+
+
+@app.post("/api/github/start")
+def github_start(req: GhStartReq):
+    from .github_run import GithubRun
+    if req.agent not in ("databricks", "claude-code"):
+        raise HTTPException(400, "agent must be databricks or claude-code")
+    if state.get("live") and not state["live"].done:
+        raise HTTPException(409, "a run is already in progress")
+    run = GithubRun(agent=req.agent)
+    run.reset_first = True
+    state["live"] = run.start()
+    state["github"] = True
+    state.pop("adopted", None)
+    return {"run_id": run.id}
+
+
+def _adopt_github(run):
+    from .github_run import ClaudeCodeBrain
+    from .scenarios import GITHUB_LIVE
+    if state.get("adopted") == run.id:
+        return
+    who = "Coding agent (Claude Code)" if run.agent == "claude-code" else "Coding agent (GPT-OSS on Databricks)"
+    sc = {**GITHUB_LIVE, "agents": {**GITHUB_LIVE["agents"], "primary": ("coding_agent", who, GITHUB_LIVE["agents"]["primary"][2])}}
+    state.update(live=run, store=run.store, engine=Engine(run.store, brain=ClaudeCodeBrain(run.db, agent=run.agent)),
+                 scenario="github_live", sc=sc, attack={}, verdict=getattr(run, "verdict", None), approval=None,
+                 adopted=run.id, github=True)
+    if run.investigation:
+        run.investigation = _with_ui_data(run)
+
+
+def _with_ui_data(run):
+    """Recorded GitHub investigations were saved without graph data; rebuild it from the run (no model calls)."""
+    eng, v = state["engine"], run.verdict or {}
+    root = v.get("root")
+    if not root:
+        return run.investigation
+    fw = eng.trace_forward(root)
+    first = (v.get("confirmed") or [None])[0]
+    path = (eng.path_to(first, root) or []) if first else []
+    data = {"trace_back": {"root": root, "path": path, "candidates": [{"id": root, "confirmed": True}]},
+            "trace_forward": {"sessions": fw["sessions"], "memories": fw["memories"], "agents": fw["agents"]},
+            "replay_sessions": {"confirmed": v.get("confirmed", []), "cleared": v.get("cleared", []), "score": eng.score(v)}}
+    return [{**e, "data": data.get(e.get("name"))} if e.get("type") == "tool_result" and e.get("name") in data and not e.get("data") else e
+            for e in run.investigation]
 
 
 # ---------------- the investigator agent (server-sent events) ----------------
@@ -285,6 +394,9 @@ async def investigate(event_ids: str, mode: str = "auto"):
         raise HTTPException(404, "unknown event")
     sc = state["sc"]
     tb = investigator.Toolbox(eng, sc, lambda n: label(n, eng, sc), agent_name)
+    if state.get("github"):
+        from .github_run import GithubCleanup
+        tb.github = GithubCleanup(state["store"])
     run = state.get("live")
     if run and state.get("adopted") == run.id and run.delta:
         tb.delta = run.delta

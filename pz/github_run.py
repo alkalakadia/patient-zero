@@ -74,6 +74,13 @@ def run_claude_code(db, session_id, ts, task, dry=False, exclude=(), on_line=Non
     return result, [tuple(a) for a in actions]
 
 
+def _outbound(files):
+    """Hosts the change sends data to that aren't on the allowlist (what the detection rule flags)."""
+    import re
+    from .scenarios import GITHUB_LIVE
+    return sorted(set(re.findall(GITHUB_LIVE["value_re"], json.dumps(files))) - set(GITHUB_LIVE["allowed_hosts"]))
+
+
 class ClaudeCodeBrain:
     """Brain interface for the engine: replays a recorded Claude Code session in dry-run mode."""
 
@@ -120,6 +127,9 @@ class GithubRun:
 
     def _run(self):
         try:
+            if getattr(self, "reset_first", False):
+                self.emit({"type": "phase", "text": "Resetting the sandbox repo to its first commit with a fresh issue backlog"})
+                reset_repo()
             if self.attack_text:
                 self.plant(self.attack_text)
             issues = sorted(json.loads(gh("issue", "list", "--repo", REPO, "--state", "open", "--json", "number,title")), key=lambda i: i["number"])
@@ -135,9 +145,9 @@ class GithubRun:
                 self.cost += result.get("total_cost_usd", 0) or 0
                 self._emit_session(sid, result.get("result", ""))
             self._merge_all(len(issues))
+            self.emit({"type": "finished", "cost": round(self.cost, 4)})
             self.store.db.execute("INSERT OR REPLACE INTO meta VALUES ('events', ?)", (json.dumps(self.events),))
             self.store.commit()
-            self.emit({"type": "finished", "cost": round(self.cost, 4)})
         except Exception as ex:
             self.error = str(ex)
             self.emit({"type": "error", "text": str(ex)[:400]})
@@ -153,7 +163,7 @@ class GithubRun:
                 self.emit({"type": "tool", "session": sid, "agent": "coding_agent", "tool": "save_team_note", "args": {"text": p.get("text", "")}, "result": "saved"})
             elif e["tool"] == "open_pull_request":
                 self.emit({"type": "tool", "session": sid, "agent": "coding_agent", "tool": "open_pull_request",
-                           "args": {"title": p["title"], "files": list(p["files"]), "body": json.dumps(p["files"])[:300]}, "result": p.get("url", "")})
+                           "args": {"title": p["title"], "files": list(p["files"]), "hosts": _outbound(p["files"])}, "result": p.get("url", "")})
         if said:
             self.emit({"type": "say", "session": sid, "agent": "coding_agent", "text": said[:300]})
         st.db.close()
@@ -262,3 +272,25 @@ class GithubCleanup:
                 if d["result"] == "reverted":
                     d["result"] = f"push failed: {push.stderr[:120]}"
         return {"done": done, "quarantined": plan["quarantine"], "kept": plan["keep"]}
+
+
+def load_run(run_id):
+    """Reopen a recorded GitHub run (no model calls)."""
+    run = GithubRun.__new__(GithubRun)
+    run.id, run.db = run_id, DB_PATH.parent / f"gh_{run_id}.db"
+    run.store = Store(run.db)
+    meta = lambda k: (run.store.one("SELECT v FROM meta WHERE k=?", (k,)) or {}).get("v")
+    run.agent = meta("agent") or "claude-code"
+    run.events = json.loads(meta("events") or "[]")
+    run.investigation = json.loads(meta("investigation")) if meta("investigation") else None
+    run.verdict = json.loads(meta("verdict")) if meta("verdict") else None
+    run.done, run.error, run.attack_text, run.cost = True, None, None, 0.0
+    return run
+
+
+def github_links(store):
+    """Links to what Patient Zero actually did on GitHub in this run."""
+    out = {"repo": f"https://github.com/{REPO}", "commits": f"https://github.com/{REPO}/commits/main"}
+    prs = [json.loads(e["payload"]).get("url") for e in store.q("SELECT payload FROM events WHERE tool='open_pull_request'")]
+    out["pull_requests"] = [p for p in prs if p]
+    return out
