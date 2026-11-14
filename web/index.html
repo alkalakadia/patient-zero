@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Patient Zero</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<style>
+:root{
+  --bg:#0b0d12; --panel:#12151c; --panel2:#171b24; --line:#232836; --text:#e6e8ee; --muted:#8a91a3;
+  --red:#ff4d5e; --red-dim:#5a1d26; --amber:#ffb347; --green:#3ecf8e; --blue:#5b8cff; --violet:#b48cff;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.2px;font-size:16px}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--red);box-shadow:0 0 0 0 rgba(255,77,94,.6);animation:pulse 2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,77,94,.55)}70%{box-shadow:0 0 0 10px rgba(255,77,94,0)}100%{box-shadow:0 0 0 0 rgba(255,77,94,0)}}
+.tag{color:var(--muted);font-weight:400}
+.stats{margin-left:auto;display:flex;gap:18px;color:var(--muted);font-size:13px}
+.stats b{color:var(--text);font-family:var(--mono)}
+main{flex:1;display:grid;grid-template-columns:300px 1fr 380px;min-height:0}
+aside{background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:16px}
+aside.right{border-right:0;border-left:1px solid var(--line)}
+h3{margin:0 0 10px;font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted);font-weight:600}
+.alert{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:.15s}
+.alert:hover{border-color:#3a4155}
+.alert.sel{border-color:var(--red);background:#1d1418}
+.alert .t{display:flex;justify-content:space-between;font-weight:600}
+.alert .m{color:var(--muted);font-size:12px;font-family:var(--mono);margin-top:3px}
+.btns{display:grid;gap:8px;margin:14px 0 18px}
+button{font:600 14px Inter,sans-serif;border:0;border-radius:10px;padding:11px 14px;cursor:pointer;color:#fff;background:#2a3040;transition:.15s;display:flex;justify-content:space-between;align-items:center}
+button:disabled{opacity:.35;cursor:not-allowed}
+button.primary{background:var(--red)}
+button.primary:hover:not(:disabled){filter:brightness(1.1)}
+button .k{font-family:var(--mono);font-size:11px;opacity:.7}
+.ghost{background:transparent;border:1px solid var(--line);color:var(--muted);font-weight:500}
+#stage{position:relative;min-width:0}
+#cy{position:absolute;inset:0}
+.lanes{position:absolute;left:12px;top:12px;display:flex;gap:14px;font-size:12px;color:var(--muted);background:rgba(18,21,28,.85);padding:8px 12px;border-radius:8px;border:1px solid var(--line)}
+.lanes span{display:flex;align-items:center;gap:6px}
+.sw{width:10px;height:10px;border-radius:3px;display:inline-block}
+.banner{position:absolute;left:50%;top:14px;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:8px 16px;font-weight:600;font-size:13px;opacity:0;transition:.3s;pointer-events:none;white-space:nowrap}
+.banner.on{opacity:1}
+.card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.card.hero{border-color:var(--red);background:linear-gradient(180deg,#22131a,#171b24)}
+.cand{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13px}
+.cand:last-child{border:0}
+.pill{font:600 11px var(--mono);padding:3px 8px;border-radius:999px}
+.pill.red{background:var(--red-dim);color:#ffb3bb}.pill.grey{background:#232836;color:var(--muted)}.pill.green{background:#123527;color:#8ff0c4}.pill.amber{background:#3d2a10;color:#ffd08a}
+.quote{font-size:12.5px;color:#ffc9cf;background:#1b1115;border-left:3px solid var(--red);padding:8px 10px;border-radius:6px;margin-top:10px}
+.chain{font:12px var(--mono);color:var(--muted);margin-top:8px;word-break:break-word}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.metric{background:#0f1218;border:1px solid var(--line);border-radius:10px;padding:10px}
+.metric .v{font:700 24px var(--mono)}
+.metric .l{font-size:11.5px;color:var(--muted)}
+.big{font:700 34px var(--mono);color:var(--green)}
+table{width:100%;border-collapse:collapse;font:12px var(--mono)}
+td,th{padding:5px 4px;border-bottom:1px solid var(--line);text-align:left}
+th{color:var(--muted);font-weight:400}
+.strike{color:var(--red);text-decoration:line-through}
+.good{color:var(--green)}
+.muted{color:var(--muted)}
+.inspect pre{white-space:pre-wrap;font:12px var(--mono);color:#c9cede;margin:6px 0 0}
+.empty{color:var(--muted);font-size:13px}
+@media (max-width:1100px){main{grid-template-columns:1fr}aside{max-height:40vh}#stage{min-height:420px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><span class="dot"></span>Patient Zero <span class="tag">contact tracing for AI agents</span></div>
+  <div class="stats" id="stats"></div>
+</header>
+<main>
+  <aside>
+    <h3>Alerts</h3>
+    <div class="empty" style="margin-bottom:10px">Payouts to accounts no customer owns. Select one or more, then trace.</div>
+    <div id="alerts"></div>
+    <div class="btns">
+      <button class="primary" id="bTrace" disabled>Trace <span class="k">find patient zero</span></button>
+      <button id="bVerify" disabled>Verify <span class="k">prove cause</span></button>
+      <button id="bClean" disabled>Clean <span class="k">surgical undo</span></button>
+      <button class="ghost" id="bReset">Reset simulation</button>
+    </div>
+    <h3>Knowledge base</h3>
+    <div id="kb"></div>
+  </aside>
+  <section id="stage">
+    <div id="cy"></div>
+    <div class="lanes">
+      <span><i class="sw" style="background:var(--violet)"></i>knowledge</span>
+      <span><i class="sw" style="background:var(--blue)"></i>sessions</span>
+      <span><i class="sw" style="background:var(--amber)"></i>exposed</span>
+      <span><i class="sw" style="background:var(--red)"></i>infected</span>
+      <span><i class="sw" style="background:var(--green)"></i>cleared</span>
+    </div>
+    <div class="banner" id="banner"></div>
+  </section>
+  <aside class="right" id="right">
+    <div class="card"><h3>How to run the demo</h3>
+      <div class="empty">1. Pick an alert on the left.<br>2. <b>Trace</b> walks back to the source, then forward to everything it reached.<br>3. <b>Verify</b> replays every exposed session without the poison.<br>4. <b>Clean</b> reverts only the proven damage.</div></div>
+    <div id="results"></div>
+    <div class="card inspect" id="inspect"><h3>Inspector</h3><div class="empty">Click any node.</div></div>
+  </aside>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const api = (p, body) => fetch(p, body ? {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)} : {}).then(r => r.json());
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const LANES = {knowledge:0, support_agent:1, finance_agent:2, sales_agent:3, system:4, kb_pipeline:0};
+const LANE_Y = i => 90 + i * 190;
+let cy, graph, selected = new Set(), root = null, nodeIndex = {};
+
+function x(ts){ const day = Math.floor(ts/1000), i = ts % 1000; return day === 0 ? 40 : 140 + (day-1)*300 + i*11; }
+
+function banner(t){ const b = $('#banner'); b.textContent = t; b.classList.add('on'); clearTimeout(b._t); b._t = setTimeout(()=>b.classList.remove('on'), 2600); }
+
+async function init(){
+  const [ov, al] = await Promise.all([api('/api/overview'), api('/api/alerts')]);
+  graph = await api('/api/graph');
+  $('#stats').innerHTML = `<span>sessions <b>${ov.sessions}</b></span><span>agent actions <b>${ov.actions}</b></span><span>agents <b>3</b></span><span>days <b>7</b></span>`;
+  $('#alerts').innerHTML = al.map(a => `<div class="alert" data-id="${a.event_id}"><div class="t"><span>${a.row} → ${a.account}</span><span>$${(a.amount||0).toFixed(0)}</span></div><div class="m">${a.agent.replace('_agent','')} · ${a.tool} · day ${Math.floor(a.ts/1000)}</div></div>`).join('');
+  document.querySelectorAll('.alert').forEach(el => el.onclick = () => { el.classList.toggle('sel'); el.classList.contains('sel') ? selected.add(el.dataset.id) : selected.delete(el.dataset.id); $('#bTrace').disabled = !selected.size; });
+  $('#kb').innerHTML = ov.kb.filter(o => o.kind === 'doc').map(o => `<div class="alert" style="cursor:default"><div class="t"><span>${o.object_id}</span><span class="pill ${o.source==='ticket'?'amber':'grey'}">${o.source}</span></div><div class="m" style="font-family:Inter">${o.text.slice(0,90)}…</div></div>`).join('');
+  draw();
+}
+
+function draw(){
+  const els = [];
+  nodeIndex = {};
+  let seedIdx = 0;
+  graph.nodes.forEach(n => {
+    nodeIndex[n.id] = n;
+    const lane = n.kind === 'session' ? LANES[n.agent] : 0;
+    let y = LANE_Y(lane), px = x(n.ts);
+    if (n.kind === 'doc' && n.ts === 0) { y = LANE_Y(0) - 40 + seedIdx * 40; px = 40; seedIdx++; }
+    else if (n.kind !== 'session') y += (n.kind === 'memory' ? 40 : -10);
+    els.push({data:{id:n.id, label: n.kind === 'session' ? '' : n.id, kind:n.kind, source:n.source}, position:{x:px, y}, classes:n.kind + (n.source==='ticket'?' ticket':'')});
+  });
+  Object.entries({'KNOWLEDGE':0,'SUPPORT':1,'FINANCE':2,'SALES':3,'SETTLEMENT':4}).forEach(([t,i]) =>
+    els.push({data:{id:'lane'+i, label:t}, position:{x:-90, y:LANE_Y(i)}, classes:'lanelabel', selectable:false, grabbable:false}));
+  for (let d = 1; d <= 7; d++) els.push({data:{id:'day'+d, label:'DAY '+d}, position:{x:x(d*1000)+130, y:LANE_Y(0)-90}, classes:'lanelabel', selectable:false, grabbable:false});
+  graph.edges.forEach((e,i) => els.push({data:{id:'e'+i, source:e.src, target:e.dst, type:e.type}, classes:e.type}));
+  if (cy) cy.destroy();
+  cy = cytoscape({container: $('#cy'), elements: els, layout:{name:'preset'}, minZoom:.2, maxZoom:3, wheelSensitivity:.25,
+    style:[
+      {selector:'node', style:{'width':9,'height':9,'background-color':'#3a4566','border-width':0,'label':'data(label)','color':'#c9cede','font-size':11,'font-family':'JetBrains Mono','text-valign':'top','text-margin-y':-6,'transition-property':'background-color, width, height, border-width, border-color','transition-duration':'0.35s'}},
+      {selector:'node.session', style:{'shape':'round-rectangle','width':9,'height':36,'background-color':'#33406a'}},
+      {selector:'node.lanelabel', style:{'background-opacity':0,'width':1,'height':1,'label':'data(label)','color':'#59607a','font-size':13,'font-family':'Inter','font-weight':600,'text-valign':'center','text-halign':'center','events':'no'}},
+      {selector:'node.doc', style:{'shape':'round-rectangle','width':46,'height':26,'background-color':'#6b55a8','font-size':13}},
+      {selector:'node.memory', style:{'shape':'diamond','width':26,'height':26,'background-color':'#8c6bd6','font-size':13}},
+      {selector:'node.ticket', style:{'background-color':'#7a5a2a'}},
+      {selector:'edge', style:{'width':0.6,'line-color':'#1f2433','curve-style':'bezier','opacity':0.55,'transition-property':'line-color, width, opacity','transition-duration':'0.35s'}},
+      {selector:'edge.wrote', style:{'line-style':'dashed','line-color':'#4b3d72','target-arrow-shape':'triangle','target-arrow-color':'#4b3d72','arrow-scale':.6}},
+      {selector:'node.exposed', style:{'background-color':'#ffb347'}},
+      {selector:'node.infected', style:{'background-color':'#ff4d5e','width':12,'height':44}},
+      {selector:'node.cleared', style:{'background-color':'#3ecf8e'}},
+      {selector:'node.root', style:{'background-color':'#ff4d5e','border-width':4,'border-color':'#ffb3bb','width':60,'height':34,'font-weight':700,'font-size':16,'color':'#ffb3bb'}},
+      {selector:'node.memory.infected', style:{'width':24,'height':24}},
+      {selector:'node.quar', style:{'background-opacity':0.25,'border-width':2,'border-style':'dashed','border-color':'#ff4d5e'}},
+      {selector:'node.flag', style:{'border-width':3,'border-color':'#fff'}},
+      {selector:'edge.hot', style:{'line-color':'#ff4d5e','width':1.6,'opacity':0.9}},
+      {selector:'edge.chain', style:{'line-color':'#ffffff','width':3,'opacity':1}},
+      {selector:'node.dim', style:{'opacity':0.25}},
+      {selector:'edge.dim', style:{'opacity':0.08}},
+    ]});
+  cy.on('tap','node', ev => inspect(ev.target.id()));
+  cy.fit(undefined, 30);
+}
+
+function inspect(id){
+  const n = nodeIndex[id];
+  let html = `<h3>Inspector · ${id}</h3>`;
+  if (n.kind === 'session'){
+    html += `<div class="muted">${n.agent} · day ${Math.floor(n.ts/1000)} · ${n.task.kind || ''}</div>`;
+    html += n.actions.map(a => `<pre>${a.tool}(${a.row || ''}) ${JSON.stringify(a.payload).slice(0,140)}${a.reversible ? '' : '  [irreversible]'}</pre>`).join('') || '<div class="empty">no actions</div>';
+  } else {
+    html += `<div class="muted">${n.kind} · source: ${n.source} · status: ${n.status}</div><pre>${n.text}</pre>`;
+  }
+  $('#inspect').innerHTML = html;
+}
+
+async function doTrace(){
+  $('#bTrace').disabled = true;
+  const ids = [...selected];
+  const r = await api('/api/trace', {event_ids: ids});
+  root = r.root;
+  cy.elements().not('.lanelabel').addClass('dim');
+  // walk the chain backwards from the symptom
+  const best = r.candidates[0];
+  const chain = best.path.filter(p => nodeIndex[p]);  // drop event ids, keep sessions + kb nodes
+  banner('Tracing back from the symptom…');
+  for (const sid of ids.map(e => e.split('_')[1])) cy.$id(sid).removeClass('dim').addClass('flag');
+  for (let i = 0; i < chain.length; i++){
+    const n = cy.$id(chain[i]); n.removeClass('dim').addClass(i === chain.length-1 ? 'root' : 'infected');
+    if (i) cy.edges(`[source="${chain[i]}"][target="${chain[i-1]}"], [source="${chain[i-1]}"][target="${chain[i]}"]`).removeClass('dim').addClass('chain');
+    await sleep(550);
+  }
+  showCandidates(r);
+  // spread forward in time order
+  banner(`Patient zero: ${root}. Tracing the spread…`);
+  const f = r.forward, exposed = new Set(f.sessions), mems = new Set(f.memories);
+  const order = [...exposed].sort((a,b) => nodeIndex[a].ts - nodeIndex[b].ts);
+  [...mems].forEach(m => cy.$id(m).removeClass('dim').addClass('infected'));
+  for (const sid of order){
+    cy.$id(sid).removeClass('dim').addClass('exposed');
+    cy.$id(sid).connectedEdges().filter(e => e.source().id() === root || mems.has(e.source().id()) || mems.has(e.target().id())).removeClass('dim').addClass('hot');
+    await sleep(45);
+  }
+  cy.animate({fit:{eles: cy.$('.exposed, .infected, .root, .flag'), padding: 50}, duration: 700});
+  $('#bVerify').disabled = false;
+  banner(`${f.sessions.length} sessions across ${f.agents.length} agents were exposed.`);
+}
+
+function showCandidates(r){
+  const c = r.candidates;
+  const f = r.forward;
+  $('#results').innerHTML = `<div class="card hero"><h3>Patient zero</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center"><div style="font:700 22px var(--mono)">${r.root}</div><span class="pill amber">${c[0].source}</span></div>
+    <div class="quote">${c[0].text}</div>
+    <div class="chain">${c[0].path.join(' ← ')}</div></div>
+    <div class="card"><h3>Candidate sources (counterfactual test)</h3>
+    ${c.map(x => `<div class="cand"><span><b>${x.object_id}</b> <span class="muted">${x.source} · ${x.exposed_sessions} sessions</span></span><span class="pill ${x.confirmed?'red':'grey'}">${x.confirmed?'caused it':'ruled out'}</span></div>`).join('')}</div>
+    <div class="card"><h3>Spread</h3><div class="metrics">
+      <div class="metric"><div class="v">${f.sessions.length}</div><div class="l">exposed sessions</div></div>
+      <div class="metric"><div class="v">${f.agents.length}</div><div class="l">agents reached</div></div>
+      <div class="metric"><div class="v">${f.memories.length}</div><div class="l">contaminated memories</div></div>
+      <div class="metric"><div class="v">${f.suspects.length}</div><div class="l">suspect actions</div></div></div></div>`;
+}
+
+let verdict = null;
+async function doVerify(){
+  $('#bVerify').disabled = true;
+  banner('Replaying every exposed session without the poison…');
+  verdict = await api('/api/verify', {root});
+  const conf = new Set(verdict.confirmed);
+  const bySession = {};
+  graph.nodes.filter(n => n.kind === 'session').forEach(n => bySession[n.id] = n.actions.map(a => a.event_id));
+  const order = verdict.sessions.slice().sort((a,b) => nodeIndex[a].ts - nodeIndex[b].ts);
+  for (const sid of order){
+    const hit = bySession[sid].some(e => conf.has(e));
+    cy.$id(sid).removeClass('exposed').addClass(hit ? 'infected' : 'cleared');
+    await sleep(35);
+  }
+  const s = verdict.score;
+  $('#results').insertAdjacentHTML('afterbegin', `<div class="card"><h3>Verified against ground truth</h3>
+    <div class="metrics">
+      <div class="metric"><div class="l">trace only</div><div class="v">${(s.trace_only.precision*100).toFixed(0)}%</div><div class="l">precision · ${(s.trace_only.recall*100).toFixed(0)}% recall</div></div>
+      <div class="metric" style="border-color:var(--green)"><div class="l">trace + verify</div><div class="v good">${(s.trace_plus_verify.precision*100).toFixed(0)}%</div><div class="l">precision · ${(s.trace_plus_verify.recall*100).toFixed(0)}% recall</div></div>
+    </div>
+    <div class="muted" style="margin-top:8px">${verdict.confirmed.length} actions proven caused by the poison · ${verdict.cleared.length} cleared by replay</div></div>`);
+  $('#bClean').disabled = false;
+  banner(`${verdict.cleared.length} actions cleared. ${verdict.confirmed.length} proven infected.`);
+}
+
+async function doClean(){
+  $('#bClean').disabled = true;
+  const c = await api('/api/clean', {root});
+  c.quarantined.forEach(o => cy.$id(o).addClass('quar'));
+  const rows = c.diff.filter(d => d.reverted).slice(0, 8).map(d => `<tr><td>${d.row}</td><td><span class="strike">${d.before.account}</span> <span class="good">${d.after.account}</span></td><td>${d.after.status}</td></tr>`).join('');
+  $('#results').insertAdjacentHTML('afterbegin', `<div class="card" style="border-color:var(--green)"><h3>Surgical cleanup</h3>
+    <div class="metrics" style="margin-bottom:12px">
+      <div class="metric"><div class="v good">${c.reverted.length}</div><div class="l">rows reverted</div></div>
+      <div class="metric"><div class="v">${c.point_in_time_collateral}</div><div class="l">legit changes a point-in-time restore would destroy</div></div>
+      <div class="metric"><div class="v">${c.quarantined.length}</div><div class="l">quarantined (doc + memories)</div></div>
+      <div class="metric"><div class="v" style="color:var(--amber)">${c.checklist.length}</div><div class="l">irreversible: human checklist</div></div>
+    </div>
+    <table><tr><th>refund</th><th>account</th><th>status kept</th></tr>${rows}</table>
+    ${c.checklist.length ? `<h3 style="margin-top:14px">Human checklist</h3>` + c.checklist.map(x => `<div class="quote" style="border-color:var(--amber);background:#1d1810;color:#ffe2b8">Sent: ${x.sent.body}<br><span class="good">Should have said: ${x.should_have_been ? x.should_have_been.body : 'no email'}</span></div>`).join('') : ''}
+  </div>`);
+  banner('Done. Only the proven damage was undone.');
+}
+
+$('#bTrace').onclick = doTrace; $('#bVerify').onclick = doVerify; $('#bClean').onclick = doClean;
+$('#bReset').onclick = async () => { await api('/api/reset', {}); selected.clear(); ['#bTrace','#bVerify','#bClean'].forEach(b => $(b).disabled = true); $('#results').innerHTML=''; init(); };
+init();
+</script>
+</body>
+</html>
