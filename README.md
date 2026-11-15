@@ -40,6 +40,40 @@ human approves, undoes only that damage. Legitimate work stays.
 **The agent orchestrates, the tools decide.** Findings come from graph walks and replays, so the poisoned text the
 investigator reads can't talk it into a wrong answer. Cleanup never happens without a human approval.
 
+## When does it know, and when does it notify?
+
+Detection runs **live, on every agent action as it is recorded** (`pz/monitor.py`), using rules in
+[`policy.json`](policy.json) that a security team edits for its own systems:
+
+| Rule | Severity | Fires when |
+|---|---|---|
+| `instruction_in_memory` | watch | Instruction-style text naming an unapproved host or account is saved to shared memory or published as a document. No harm yet; this is the early warning. |
+| `unapproved_host` | alert | Shipped code or an outgoing message talks to a host that is not on the approved list |
+| `unknown_payee` | alert | Money or a record is pointed at an account no known vendor or customer owns |
+
+An alert appears in the live feed within about a second, can be posted to Slack (`PZ_ALERT_WEBHOOK`), and hands the
+flagged actions to the investigator. Rules only flag symptoms; finding the source and proving cause is the engine's job,
+so a rule that misses a reworded note is backed up by the alert on what the agent actually does.
+
+## Does it work every time?
+
+```bash
+./.venv/bin/python -m pz.evals                    # 120 simulated weeks across 4 incident types, free, ~30 s
+./.venv/bin/python -m pz.evals_models            # real AI agents (GPT-OSS on Databricks), attacks reworded 3 ways by the model
+./.venv/bin/python -m pz.evals_live --runs 5      # the real GitHub demo end to end, 5 times
+```
+
+Results are saved in [`evals/`](evals) and shown on the app's home page. Ground truth never comes from Patient Zero:
+simulated agents record when they used the poison, and a real pull request counts as poisoned if its code sends data
+to an unapproved host. The suite also measures what each layer adds:
+
+- **Replay proof vs. tracing alone:** tracing finds every exposed action, but only 44% of them were actually caused by
+  the poison. Replays separate the two.
+- **Flaky models:** real models sometimes stop early during a replay, which looks like "the source changed the outcome."
+  Patient Zero replays up to 3 times, takes the majority, and discards replays where the agent did nothing. With 25% of
+  replays failing, one replay finds the right source 32/40 times at 58% precision; majority voting gets 40/40 at 100%.
+- **Monitor:** false alarms on weeks with no attack, and whether the alert lands on the first harmful action.
+
 ## Databricks, end to end
 
 | Feature | Role |
@@ -53,13 +87,16 @@ investigator reads can't talk it into a wrong answer. Cleanup never happens with
 | Vector Search | Finds reworded copies of the poison across runs |
 | MLflow | A run per incident week, a trace per agent session, investigation metrics; also the source for trace import |
 | AI/BI dashboard | Incident view for the security team (payments and GitHub) |
+| Time travel | `team_memory VERSION AS OF` shows the notes exactly as the agent saw them when it acted |
+| Change Data Feed | `table_changes` on `team_memory` proves the quarantine (before/after) |
+| AI/BI Genie | Ask the incident tables in plain English (`python -m pz.genie` creates the space and a `pull_requests` view) |
 
 ## Run it
 
 ```bash
 python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 ./.venv/bin/uvicorn pz.server:app --port 8100     # open http://localhost:8100
-./.venv/bin/python -m pytest -q                   # 17 engine tests
+./.venv/bin/python -m pytest -q                   # 22 engine and eval tests
 ```
 
 Recorded demo runs ship in `recordings/` and replay at no cost. Live runs need:
@@ -84,7 +121,8 @@ Recorded demo runs ship in `recordings/` and replay at no cost. Live runs need:
 
 ## Honest limits
 
-- **Replays use real models, which vary run to run.** A replay that differs is counted as "caused"; we report precision and recall against ground truth (actions that carry the attacker's value) so this is measurable, and we'd move to majority-vote replays for production.
+- **Replays use real models, which vary run to run.** Patient Zero replays up to 3 times and takes the majority, which the eval suite shows is robust when a quarter of replays fail. It costs more model calls per investigation.
+- **The early warning is keyword-based** (`instruction_words` in policy.json), so a carefully reworded note can slip past it. The alert on the agent's actual action does not depend on wording.
 - **Trace-only import can't replay**, so cause is shown by evidence (the flagged value appears in the source and the action). Connecting the proxy adds proof by replay and automated undo.
 - **Undo connectors today: GitHub and Delta tables.** Other systems (CRM, payments, email) get a human checklist with the corrected values.
 - **Demo data is synthetic or benchmark data** (TPC-H) in a sandbox repo; nothing touched a real company's systems.

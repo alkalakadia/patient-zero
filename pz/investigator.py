@@ -45,7 +45,17 @@ class Toolbox:
                "candidates": [{"id": c["object_id"], "kind": c["kind"], "source": c["source"],
                                "removing_it_changes_outcome": c["confirmed"],
                                "text_UNTRUSTED": c["text"][:600]} for c in cands]}
-        return out, {"candidates": cands, "root": out["patient_zero"]}
+        tt = None
+        if self.delta and getattr(self.delta, "mem_versions", None):
+            first = min(self.e.event[x]["ts"] for x in event_ids)
+            try:
+                v, rows = self.delta.memory_as_of(first)
+                if v is not None:
+                    tt = {"version": v, "notes": [{"id": r["object_id"], "source": r["source"]} for r in rows]}
+                    out["delta_time_travel"] = {"team_memory_version": v, "notes_the_agent_saw": [r["object_id"] for r in rows]}
+            except Exception as ex:
+                out["delta_time_travel"] = {"error": str(ex)[:120]}
+        return out, {"candidates": cands, "root": out["patient_zero"], "time_travel": tt}
 
     def trace_forward(self, root):
         f = self.e.trace_forward(root)
@@ -109,8 +119,17 @@ class Toolbox:
                 self.delta.record_incident("github", root, len(self.verdict["confirmed"]), len(self.verdict["cleared"]),
                                            sum(1 for d in res["done"] if d["result"] in ("reverted", "closed")),
                                            json.dumps([{"title": d["title"], "result": d["result"], "url": d.get("url")} for d in res["done"]]))
-            return {"github": [f"{d['result']}: {d['title']}" for d in res["done"]], "quarantined": res["quarantined"],
-                    "rows_fixed": sum(1 for d in res["done"] if d["result"] in ("reverted", "closed"))}, {**res, "reverted": [], "checklist": []}
+            delta = None
+            if self.delta and getattr(self.delta, "mem_versions", None):
+                try:
+                    delta = self.delta.quarantine_memory(res["quarantined"])
+                except Exception as ex:
+                    delta = {"error": str(ex)[:160], "changes": []}
+            out = {"github": [f"{d['result']}: {d['title']}" for d in res["done"]], "quarantined": res["quarantined"],
+                   "rows_fixed": sum(1 for d in res["done"] if d["result"] in ("reverted", "closed"))}
+            if delta:
+                out["delta_change_feed_rows"] = len(delta["changes"])
+            return out, {**res, "reverted": [], "checklist": [], "delta": delta}
         result = self.e.clean(self.verdict)
         out = {"rows_fixed": len(result["reverted"]), "quarantined": result["quarantined"], "checklist": len(result["checklist"])}
         if self.on_cleanup:

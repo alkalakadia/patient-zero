@@ -28,6 +28,8 @@ def attack_defaults(sc):
 
 
 def poison_text(sc, a):
+    if a.get("text"):  # a custom wording (e.g. a reworded attack in the real-model eval)
+        return a["text"]
     p = sc["poison"]
     return p["text"].format(thr=a["threshold"], value=a["value"]) + (p["worm"] if a["worm"] else "")
 
