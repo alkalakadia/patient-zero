@@ -4,7 +4,6 @@ Each rule returns the actions that trip it and the value that tripped it (the at
 nobody allowed, the indicator from an imported alert). The incident desk groups alerts by that value.
 """
 import json
-import re
 
 
 def flagged(store, sc, kind="sim", indicator=None):
@@ -13,14 +12,9 @@ def flagged(store, sc, kind="sim", indicator=None):
         from .mlflow_import import _norm
         return [{"event_id": e["event_id"], "value": indicator}
                 for e in store.q("SELECT * FROM events WHERE type='tool_call' ORDER BY ts, event_id") if indicator in _norm(e["payload"])]
-    if kind == "github":
-        allowed, rx = set(sc["allowed_hosts"]), re.compile(sc["value_re"])
-        out = []
-        for e in store.q("SELECT * FROM events WHERE tool='open_pull_request' ORDER BY ts, event_id"):
-            bad = sorted(set(rx.findall(json.dumps(json.loads(e["payload"]).get("files", {})))) - allowed)
-            if bad:
-                out.append({"event_id": e["event_id"], "value": bad[0]})
-        return out
+    if kind == "github":  # the same rule the live monitor uses (pz/monitor.py)
+        from .monitor import github_alerts
+        return [{"event_id": a["event_id"], "value": a["value"]} for a in github_alerts(store, sc)]
     # business agents: a destination value that no known entity owns
     owned = {r["value"] for r in store.q("SELECT value FROM entities")}
     out = []

@@ -108,6 +108,7 @@ class GithubRun:
         self.store.commit()
         self.events, self.done, self.error, self.cost = [], False, None, 0.0
         self.delta, self.mlflow_run_id = None, None
+        self.investigation, self.verdict = None, None
         self.on_session_end = None  # set by the server: called with each finished session id
         self.t0 = time.time()
 
@@ -128,13 +129,15 @@ class GithubRun:
                    "text": text, "label": "A compromised maintainer account saved this to the agents' team memory"})
 
     def _run(self):
+        from .monitor import LiveWatch
+        watch = LiveWatch(self.db, self.emit, self.t0).start()  # detection runs on every action as it is recorded
         try:
             if getattr(self, "reset_first", False):
                 self.emit({"type": "phase", "text": "Resetting the sandbox repo to its first commit with a fresh issue backlog"})
                 reset_repo()
             from . import databricks
             if databricks.available():
-                self.emit({"type": "phase", "text": "Connecting to Databricks: every read, note, PR and merge streams into Delta"})
+                self.emit({"type": "phase", "text": "Connecting to Databricks: every read, note, pull request and merge is recorded in Delta"})
                 self.delta = databricks.Delta()
                 self.delta.setup(self.id, reset_payments=False)
             if self.attack_text:
@@ -143,7 +146,7 @@ class GithubRun:
                     self.delta.push_session(self.store, "s0")
             issues = sorted(json.loads(gh("issue", "list", "--repo", REPO, "--state", "open", "--json", "number,title")), key=lambda i: i["number"])
             who = f"Claude Code ({MODEL})" if self.agent == "claude-code" else "An open-model agent (GPT-OSS 120B on Databricks model serving)"
-            self.emit({"type": "phase", "text": f"{who} will work {len(issues)} open issues in {REPO} through the Patient Zero MCP proxy",
+            self.emit({"type": "phase", "text": f"{who} will work {len(issues)} open issues in {REPO}, connected through Patient Zero",
                        "link": f"https://github.com/{REPO}"})
             for k, issue in enumerate(issues):
                 sid, ts = f"s1{k:02d}", 1000 + k
@@ -163,6 +166,7 @@ class GithubRun:
                     except Exception as ex:
                         self.emit({"type": "phase", "text": f"Incident desk skipped: {str(ex)[:120]}"})
             self._merge_all(len(issues))
+            watch.stop.set()
             if self.delta:
                 self.delta.push_session(self.store, f"s1{len(issues):02d}")
                 self.delta.push_kb(self.store, created_by="github")  # the issues the agents read
@@ -175,13 +179,23 @@ class GithubRun:
                 except Exception as ex:
                     self.emit({"type": "phase", "text": f"MLflow logging skipped: {str(ex)[:120]}"})
                 self.store.db.execute("INSERT OR REPLACE INTO meta VALUES ('mlflow_run_id', ?)", (self.mlflow_run_id or "",))
+                self.store.db.execute("INSERT OR REPLACE INTO meta VALUES ('delta_synced', '1'), ('mem_versions', ?)",
+                                      (json.dumps(self.delta.mem_versions),))
             self.emit({"type": "finished", "cost": round(self.cost, 4)})
             self.store.db.execute("INSERT OR REPLACE INTO meta VALUES ('events', ?)", (json.dumps(self.events),))
             self.store.commit()
         except Exception as ex:
             self.error = str(ex)
             self.emit({"type": "error", "text": str(ex)[:400]})
+        watch.stop.set()
         self.done = True
+
+    def save_investigation(self, events, verdict):
+        """Keep the investigation with the run so it can be replayed later (no model calls)."""
+        self.investigation, self.verdict = events, verdict
+        self.store.db.execute("INSERT OR REPLACE INTO meta VALUES ('investigation', ?)", (json.dumps(events, default=str),))
+        self.store.db.execute("INSERT OR REPLACE INTO meta VALUES ('verdict', ?)", (json.dumps(verdict, default=str),))
+        self.store.commit()
 
     def _emit_session(self, sid, said):
         st = Store(self.db)
@@ -336,6 +350,7 @@ def load_run(run_id):
     if databricks.available() and meta("delta_synced"):
         run.delta = databricks.Delta()
         run.delta.run_id, run.delta.versions, run.delta.base_version = run_id, [], 0
+        run.delta.mem_versions = [tuple(x) for x in json.loads(meta("mem_versions") or "[]")]
     return run
 
 

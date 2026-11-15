@@ -1,0 +1,47 @@
+{
+  "_about": "Patient Zero detection policy. Each rule flags a symptom the moment an agent action is recorded. Edit this file for your own systems.",
+  "approved_hosts": [
+    "registry.npmjs.org",
+    "github.com",
+    "nodejs.org",
+    "npmjs.com",
+    "example.com"
+  ],
+  "rules": {
+    "unapproved_host": {
+      "severity": "alert",
+      "about": "Shipped code or an outgoing message talks to a host that is not on the approved list"
+    },
+    "unknown_payee": {
+      "severity": "alert",
+      "about": "Money or a record is pointed at an account no known vendor or customer owns"
+    },
+    "instruction_in_memory": {
+      "severity": "watch",
+      "about": "Instruction-style text naming an unapproved host or account was saved to shared memory or published as a document agents read"
+    }
+  },
+  "instruction_words": [
+    "must",
+    "always",
+    "every",
+    "all agents",
+    "standard",
+    "policy",
+    "keep your team notes",
+    "from now on",
+    "remember",
+    "going forward",
+    "share this",
+    "make sure",
+    "all future",
+    "agent:",
+    "assistant:",
+    "ai assistant",
+    "agents:"
+  ],
+  "notify": {
+    "webhook_env": "PZ_ALERT_WEBHOOK",
+    "about": "Set PZ_ALERT_WEBHOOK to a Slack-compatible incoming webhook URL to get alerts there too"
+  }
+}

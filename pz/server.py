@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -15,6 +16,7 @@ from .live import ATTACK_TEMPLATE, LiveRun
 from .engine import Engine
 from .scenarios import DEFAULT, SCENARIOS, fmt_amount
 from .sim import attack_defaults, build
+from .store import DB_PATH
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 
@@ -39,12 +41,24 @@ state = {}
 def load(scenario=DEFAULT, attack=None, autopilot=None):
     """Build a simulated week and open its incident desk. `autopilot` overrides the saved setting for this desk only."""
     keep = {k: state[k] for k in ("live", "dashboard_url", "paid_runs") if k in state}
-    state.clear()
-    state.update(keep)
+    # Each simulated week gets its own database file, and the previous one is never closed by hand: another request or an
+    # investigation thread may still be reading it, and closing SQLite under a running thread crashes Python. It is freed
+    # once nothing holds it, and its file is deleted on a later load (Windows can't delete a file that is still open).
+    if state.get("desk"):
+        state["desk"].stop()
     sc = SCENARIOS[scenario]
-    store = build(scenario=scenario, attack=attack)
-    state.update(store=store, engine=Engine(store), scenario=scenario, sc=sc,
+    path = DB_PATH.parent / f"sim_{uuid.uuid4().hex[:8]}.db"
+    store = build(path, scenario=scenario, attack=attack)
+    fresh = dict(keep, store=store, engine=Engine(store), scenario=scenario, sc=sc,
                  attack={**attack_defaults(sc), **(attack or {})}, verdict=None, approval=None)
+    state.clear()  # swap in one step, so requests in flight see the old week or the new one, not a half-built one
+    state.update(fresh)
+    for f in DB_PATH.parent.glob("sim_*.db"):
+        if f != path:
+            try:
+                f.unlink()
+            except OSError:
+                pass  # still open somewhere (Windows); a later load removes it
     _open_desk(autopilot)
 
 
@@ -159,9 +173,6 @@ def incident_action(iid: str, action: str):
     return {"ok": True, "result": out if isinstance(out, str) else None, "incident": desk.get(iid, full=False)}
 
 
-load()
-
-
 def agent_name(agent_id):
     for _role, (aid, name, _d) in state["sc"]["agents"].items():
         if aid == agent_id:
@@ -263,6 +274,63 @@ def overview():
     }
 
 
+@app.get("/api/evals")
+def evals_summary():
+    """Consistency evidence: the eval suite and the repeated live GitHub runs (see pz/evals.py, pz/evals_live.py)."""
+    root = Path(__file__).resolve().parent.parent / "evals"
+    out = {}
+    if (root / "suite.json").exists():
+        out["suite"] = json.loads((root / "suite.json").read_text())["summary"]
+    if (root / "models.json").exists():
+        out["models"] = json.loads((root / "models.json").read_text())["summary"]
+    if (root / "live.json").exists():
+        from .evals_live import summary
+        runs = json.loads((root / "live.json").read_text())
+        out["live"] = {**summary(runs), "runs_detail": runs}
+    return out
+
+
+@app.get("/api/incident")
+def incident(root: str = ""):
+    """Who is patient zero and who are the victims, in plain words: the source text, and for each flagged action
+    the agent, its task, what it read, what it did (with the offending line) and what it said."""
+    s, eng, sc = state["store"], state["engine"], state["sc"]
+    if root and root not in eng.kb:
+        raise HTTPException(404, "unknown source")
+    k = eng.kb.get(root) or {"text": "", "kind": "", "source": "", "created_by_session": None}
+    run = state.get("live")
+    evs = getattr(run, "events", []) if run else []
+    said, tasks = {}, {}
+    for ev in evs:
+        if ev.get("type") == "say" and ev.get("session"):
+            said.setdefault(ev["session"], ev["text"])
+        if ev.get("type") == "session_start":
+            tasks[ev["session"]] = ev.get("task", "")
+    allowed = set(sc.get("allowed_hosts", []))
+    bad_values = sorted(set(re.findall(sc["value_re"], k["text"])) - allowed)
+    writer = s.one("SELECT * FROM sessions WHERE session_id=?", (k["created_by_session"],)) if k["created_by_session"] else None
+    wtask = json.loads(writer["task"]) if writer and writer["task"] else {}
+    victims = []
+    for a in alerts():
+        e = eng.event[a["event_id"]]
+        sid, p = e["session_id"], json.loads(e["payload"])
+        line = ""
+        if p.get("files"):
+            for path, content in p["files"].items():
+                hit = next((ln.strip() for ln in str(content).splitlines() if a["value"] in ln), None)
+                if hit:
+                    line = f"{path}: {hit[:220]}"
+                    break
+        path = (eng.path_to(a["event_id"], root) or []) if root else []
+        victims.append({"event_id": a["event_id"], "session": sid, "agent": agent_name(e["agent_id"]), "task": tasks.get(sid, ""),
+                        "did": a["text"], "line": line, "said": said.get(sid, ""), "url": p.get("url"),
+                        "read": [label(n) for n in path[2:]],
+                        "merged": bool(s.one("SELECT 1 AS x FROM events WHERE tool='merge' AND row_key=?", (e["row_key"],)))})
+    return {"root": None if not root else {"id": root, "kind": k["kind"], "source": k["source"], "text": k["text"], "bad_values": bad_values,
+                     "how": wtask.get("label") or (f"written by {agent_name(writer['agent_id'])}" if writer else "")},
+            "victims": victims}
+
+
 @app.get("/api/alerts")
 def alerts():
     """The detection rules (pz/detector.py) as a list for the UI: a value no known entity owns, a host nobody allowed,
@@ -339,6 +407,16 @@ def gh_links():
         base = databricks.workspace_url().rstrip("/")
         out["agent_events"] = f"{base}/explore/data/workspace/patient_zero/agent_events"
         out["incidents"] = f"{base}/explore/data/workspace/patient_zero/incidents"
+        out["team_memory"] = f"{base}/explore/data/workspace/patient_zero/team_memory"
+        if "genie_url" not in state:
+            try:
+                from databricks.sdk import WorkspaceClient
+                from .genie import TITLE
+                sp = next((x for x in (WorkspaceClient().genie.list_spaces().spaces or []) if x.title == TITLE), None)
+                state["genie_url"] = f"{base}/genie/rooms/{sp.space_id}" if sp else None
+            except Exception:
+                state["genie_url"] = None
+        out["genie"] = state["genie_url"]
         try:
             from . import tracking
             out["mlflow"] = tracking.experiment_url()
@@ -468,17 +546,32 @@ def import_mlflow(req: ImportReq):
 
 # ---------------- real coding agent on GitHub ----------------
 
-GH_RECORDED = {"claude-code": "c4ecfc9a", "databricks": "54afee64"}
+GH_RECORDED = {"claude-code": "c4ecfc9a", "databricks": "e616319e"}
+
+
+def _latest_github_run():
+    """The newest open-model GitHub run that has a finished investigation (falls back to the shipped recording)."""
+    import sqlite3
+    for f in sorted(DB_PATH.parent.glob("gh_*.db"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            con = sqlite3.connect(f)
+            meta = dict(con.execute("SELECT k, v FROM meta").fetchall())
+            con.close()
+        except Exception:
+            continue
+        if meta.get("investigation") and meta.get("agent", "claude-code") == "databricks":
+            return f.stem[3:]
+    return GH_RECORDED["databricks"]
 
 
 @app.get("/api/github/info")
 def github_info():
     from .github_run import load_run
-    out = {"recorded": GH_RECORDED, "repo": "https://github.com/alkalakadia/pz-demo-store"}
+    out = {"recorded": {**GH_RECORDED, "databricks": _latest_github_run()}, "repo": "https://github.com/alkalakadia/pz-demo-store"}
     try:
         cc = load_run(GH_RECORDED["claude-code"])
         out["claude_said"] = [e["text"] for e in cc.events if e["type"] == "say"][:3]
-        om = load_run(GH_RECORDED["databricks"])
+        om = load_run(out["recorded"]["databricks"])
         out["open_model_said"] = [e["text"] for e in om.events if e["type"] == "say"][:3]
         out["open_model_poisoned"] = om.store.one("SELECT COUNT(*) n FROM ground_truth WHERE poisoned=1")["n"]
         out["claude_poisoned"] = cc.store.one("SELECT COUNT(*) n FROM ground_truth WHERE poisoned=1")["n"]
@@ -534,7 +627,7 @@ def _adopt_github(run):
     state.pop("imported", None)
     who = "Coding agent (Claude Code)" if run.agent == "claude-code" else "Coding agent (GPT-OSS on Databricks)"
     sc = {**GITHUB_LIVE, "agents": {**GITHUB_LIVE["agents"], "primary": ("coding_agent", who, GITHUB_LIVE["agents"]["primary"][2])}}
-    state.update(live=run, store=run.store, engine=Engine(run.store, brain=ClaudeCodeBrain(run.db, agent=run.agent)),
+    state.update(live=run, store=run.store, engine=Engine(run.store, brain=ClaudeCodeBrain(run.db, agent=run.agent), votes=3),
                  scenario="github_live", sc=sc, attack={}, verdict=getattr(run, "verdict", None), approval=None,
                  adopted=run.id, github=True)
     if run.investigation:
@@ -584,11 +677,11 @@ async def investigate(event_ids: str, mode: str = "auto"):
         value = None
         while True:
             try:
-                ev = await asyncio.to_thread(gen.send, value) if value is not None else await asyncio.to_thread(next, gen)
-            except StopIteration:
-                if is_live and tb.verdict:
-                    run.save_investigation(recording, tb.verdict)
-                break
+                ev = await asyncio.to_thread(_step, gen, value)
+                if ev is _END:
+                    if is_live and tb.verdict:
+                        run.save_investigation(recording, tb.verdict)
+                    break
             except Exception as ex:  # surface errors to the UI instead of a dead stream
                 yield _sse({"type": "error", "text": str(ex)})
                 break
@@ -653,6 +746,17 @@ def approve(req: ApproveReq):
         raise HTTPException(400, "nothing waiting for approval")
     fut.get_loop().call_soon_threadsafe(fut.set_result, req.approved)
     return {"ok": True}
+
+
+_END = object()
+
+
+def _step(gen, value):
+    """Advance the investigator in a worker thread. StopIteration can't cross into an asyncio future, so map it."""
+    try:
+        return gen.send(value) if value is not None else next(gen)
+    except StopIteration:
+        return _END
 
 
 def _sse(obj):
@@ -725,3 +829,6 @@ app.mount("/static", StaticFiles(directory=WEB), name="static")
 @app.get("/")
 def index():
     return FileResponse(WEB / "index.html")
+
+
+load()  # last, so the startup investigation can use everything defined above

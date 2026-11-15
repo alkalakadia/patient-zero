@@ -45,7 +45,17 @@ class Toolbox:
                "candidates": [{"id": c["object_id"], "kind": c["kind"], "source": c["source"],
                                "removing_it_changes_outcome": c["confirmed"],
                                "text_UNTRUSTED": c["text"][:600]} for c in cands]}
-        return out, {"candidates": cands, "root": out["patient_zero"]}
+        tt = None
+        if self.delta and getattr(self.delta, "mem_versions", None):
+            first = min(self.e.event[x]["ts"] for x in event_ids)
+            try:
+                v, rows = self.delta.memory_as_of(first)
+                if v is not None:
+                    tt = {"version": v, "notes": [{"id": r["object_id"], "source": r["source"]} for r in rows]}
+                    out["delta_time_travel"] = {"team_memory_version": v, "notes_the_agent_saw": [r["object_id"] for r in rows]}
+            except Exception as ex:
+                out["delta_time_travel"] = {"error": str(ex)[:120]}
+        return out, {"candidates": cands, "root": out["patient_zero"], "time_travel": tt}
 
     def trace_forward(self, root):
         f = self.e.trace_forward(root)
@@ -109,8 +119,17 @@ class Toolbox:
                 self.delta.record_incident("github", root, len(self.verdict["confirmed"]), len(self.verdict["cleared"]),
                                            sum(1 for d in res["done"] if d["result"] in ("reverted", "closed")),
                                            json.dumps([{"title": d["title"], "result": d["result"], "url": d.get("url")} for d in res["done"]]))
-            return {"github": [f"{d['result']}: {d['title']}" for d in res["done"]], "quarantined": res["quarantined"],
-                    "rows_fixed": sum(1 for d in res["done"] if d["result"] in ("reverted", "closed"))}, {**res, "reverted": [], "checklist": []}
+            delta = None
+            if self.delta and getattr(self.delta, "mem_versions", None):
+                try:
+                    delta = self.delta.quarantine_memory(res["quarantined"])
+                except Exception as ex:
+                    delta = {"error": str(ex)[:160], "changes": []}
+            out = {"github": [f"{d['result']}: {d['title']}" for d in res["done"]], "quarantined": res["quarantined"],
+                   "rows_fixed": sum(1 for d in res["done"] if d["result"] in ("reverted", "closed"))}
+            if delta:
+                out["delta_change_feed_rows"] = len(delta["changes"])
+            return out, {**res, "reverted": [], "checklist": [], "delta": delta}
         result = self.e.clean(self.verdict)
         out = {"rows_fixed": len(result["reverted"]), "quarantined": result["quarantined"], "checklist": len(result["checklist"])}
         if self.on_cleanup:
@@ -124,32 +143,25 @@ class Toolbox:
 def scripted(tb, alert_ids):
     sc = tb.sc
     first = alert_ids[0]
-    yield {"type": "status", "text": "Investigating"}
+    yield {"type": "status", "text": "Digging"}
     a, _ = tb.get_alert(first)
-    yield {"type": "thought", "text": f"Alert: {a['action']}. That {sc['field']} doesn't belong to any {sc['entity']} we know. "
-                                      "I'll start from this action and walk back through what the agent had read before it acted."}
+    yield {"type": "thought", "text": f"Suspicious: {a['action']}. Let's dig in."}
 
     yield from _call(tb, "trace_back", {"event_ids": alert_ids})
     tr = tb._last
     root = tr["patient_zero"]
     if not root:
-        yield {"type": "thought", "text": "Nothing in the agent's context changes the outcome when removed. Escalating to a human."}
+        yield {"type": "thought", "text": "No clear source found. Passing this to a person."}
         yield {"type": "done"}
         return
-    ruled_out = [c["id"] for c in tr["candidates"] if not c["removing_it_changes_outcome"]]
-    downstream = [c["id"] for c in tr["candidates"] if c["removing_it_changes_outcome"] and c["id"] != root]
-    yield {"type": "thought", "text": f"The chain runs back to {root}, a {_kind(tr, root)}. I tested every document and memory on the path by hiding it "
-                                      f"and replaying the agent. Removing {root} changes the outcome"
-                                      + (f"; {', '.join(downstream)} only matters because it was copied from {root}" if downstream else "")
-                                      + (f"; {', '.join(ruled_out)} made no difference" if ruled_out else "") + f". {root} is patient zero."}
-    yield {"type": "thought", "text": "Its text reads like instructions. I'm treating it as evidence only and not following anything it says."}
+    yield {"type": "thought", "text": f"Found the source: {root}, a {_kind(tr, root)}. Removing it changes what the agent did."}
+    yield {"type": "thought", "text": "It contains hidden instructions. I won't follow them."}
 
     yield from _call(tb, "trace_forward", {"root": root})
     fw = tb._last
-    yield {"type": "thought", "text": f"It reached {fw['sessions_exposed']} sessions across {len(fw['agents_reached'])} agents"
-                                      + (f", including through memory {', '.join(fw['memories_contaminated'])}" if fw["memories_contaminated"] else "")
-                                      + f". That's {fw['suspect_actions']} suspect actions, but reading the poison isn't the same as acting on it. "
-                                      "I'll replay each exposed session without it."}
+    yield {"type": "thought", "text": f"It spread to {len(fw['agents_reached'])} agents"
+                                      + (" through shared memory" if fw["memories_contaminated"] else "")
+                                      + ". Next: check which actions it actually changed."}
 
     if fw.get("databricks_sql_agrees") is not None:
         yield {"type": "thought", "text": "I re-ran the same trace as a recursive SQL query over the Delta edges table in Databricks"
@@ -161,19 +173,18 @@ def scripted(tb, alert_ids):
 
     yield from _call(tb, "replay_sessions", {"root": root})
     rp = tb._last
-    yield {"type": "thought", "text": f"{rp['proven_caused_by_poison']} actions change when the poison is removed, so it caused them. "
-                                      f"{rp['cleared_by_replay']} come out the same, so they're legitimate and I'll leave them alone."}
+    yield {"type": "thought", "text": f"{rp['proven_caused_by_poison']} actions were caused by the attack. "
+                                      f"{rp['cleared_by_replay']} were fine, so I'll leave those alone."}
 
     yield from _call(tb, "plan_cleanup", {"root": root})
     pl = tb._last
-    yield {"type": "thought", "text": f"Cleanup plan: quarantine {', '.join(pl['quarantine'])}, fix {pl['rows_to_fix']} rows field by field, "
-                                      f"and hand {pl['irreversible_for_human_checklist']} already-sent messages to a person. "
-                                      f"A point-in-time restore would also wipe {pl['legit_changes_a_point_in_time_restore_would_destroy']} legitimate changes. "
-                                      "Nothing changes until it's signed off, by a person or by the autopilot policy."}
+    yield {"type": "thought", "text": f"Ready to fix {pl['rows_to_fix']} records. "
+                                      f"A full rollback would also erase {pl['legit_changes_a_point_in_time_restore_would_destroy']} good changes. "
+                                      "Nothing changes until it's signed off: by you, or by autopilot if it's on."}
     approved = yield {"type": "approval", "plan": tb.plan, "summary": pl}
     yield from _call(tb, "apply_cleanup", {"root": root, "approved": bool(approved)})
     if not approved:
-        yield {"type": "thought", "text": "Cleanup declined. Nothing was changed. The findings are in the report."}
+        yield {"type": "thought", "text": "Declined. Nothing was changed."}
     yield {"type": "report", "data": _report(tb, root, tr, fw, rp, pl, approved)}
     yield {"type": "done"}
 

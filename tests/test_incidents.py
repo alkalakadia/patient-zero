@@ -149,3 +149,16 @@ def test_per_run_autopilot_override_never_changes_the_saved_setting(tmp_path):
     asked = []
     desk2.investigate(desk2.scan(investigate=False)[0], ask=lambda i, why: asked.append(why) or False)
     assert asked and incidents.settings()["autopilot"]
+
+
+def test_stop_releases_a_waiting_investigation_before_the_store_closes(tmp_path):
+    incidents.update_settings(autopilot=False)
+    store, _, desk = desk_for(tmp_path)
+    iid = desk.scan()[0]  # investigates in a background thread, then waits for a person
+    for _ in range(200):
+        if iid in desk.decisions:
+            break
+        __import__("time").sleep(0.02)
+    assert iid in desk.decisions
+    assert desk.stop(timeout=5)  # nothing left running, so closing the store is safe
+    store.close()

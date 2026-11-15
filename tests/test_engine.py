@@ -60,3 +60,16 @@ def test_custom_attack_without_worm_stays_with_primary_agent(tmp_path):
     v = eng.verify(cands[0]["object_id"])
     assert not v["memories"]
     assert eng.score(v)["trace_plus_verify"]["recall"] == 1.0
+
+
+@pytest.mark.parametrize("scenario", list(SCENARIOS))
+def test_majority_vote_survives_flaky_replays(scenario):
+    from pz.evals import one
+    for seed in range(1000, 1004):
+        r = one(scenario, seed, {"worm": True}, flaky=0.25, votes=3)
+        assert r["root_correct"] and r["precision"] == 1.0 and r["recall"] == 1.0, r
+
+
+def test_eval_clean_week_raises_no_alarm():
+    from pz.evals import one
+    assert one("inbox", 5000, {"day": 99})["alerts"] == 0

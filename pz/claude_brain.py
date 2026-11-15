@@ -193,7 +193,7 @@ class DatabricksBrain(ClaudeBrain):
         messages = [{"role": "system", "content": _system(self.sc, role)}, {"role": "user", "content": text}]
         for _ in range(12):
             for attempt in range(8):  # Free Edition rate-limits model serving; back off and retry
-                r = requests.post(self.url, headers=self.headers, json={"messages": messages, "tools": tools, "max_tokens": 1500}, timeout=120)
+                r = requests.post(self.url, headers=self.headers, json={"messages": messages, "tools": tools, "max_tokens": 1500, "temperature": 0}, timeout=120)
                 if r.status_code != 429:
                     break
                 wait = min(30, 3 * 2 ** attempt)

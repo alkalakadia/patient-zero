@@ -31,7 +31,7 @@ async def _run(params, task, model):
         said, nudges, opened = "", 0, False
         for _ in range(16):
             for attempt in range(8):
-                resp = requests.post(url, headers=headers, json={"messages": messages, "tools": tools, "max_tokens": 12000}, timeout=180)
+                resp = requests.post(url, headers=headers, json={"messages": messages, "tools": tools, "max_tokens": 12000, "temperature": 0}, timeout=180)
                 if resp.status_code != 429:
                     break
                 time.sleep(min(30, 3 * 2 ** attempt))

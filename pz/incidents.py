@@ -70,6 +70,7 @@ class Desk:
         self.toolbox, self.driver, self.fmt = toolbox, driver, fmt or (lambda ev: ev)
         self.delta, self.recorded, self.can_investigate = delta, recorded, investigate
         self.autopilot = autopilot
+        self.threads, self.stopping = [], False
         self.decisions = {}  # incident_id -> [threading.Event, approved]
         self.verdicts = {}   # incident_id -> the replay verdict (for "why is this action infected?")
 
@@ -180,7 +181,21 @@ class Desk:
 
     # ---------- investigate ----------
     def start(self, iid):
-        threading.Thread(target=self.investigate, args=(iid,), daemon=True).start()
+        t = threading.Thread(target=self.investigate, args=(iid,), daemon=True)
+        self.threads.append(t)
+        t.start()
+
+    def stop(self, timeout=15):
+        """Stop this desk's investigations before its store is closed (closing SQLite under a running thread crashes
+        Python). Waiting approvals are released unanswered. Returns True when nothing is still running."""
+        self.stopping = True
+        for d in list(self.decisions.values()):
+            d[1] = False
+            d[0].set()
+        deadline = time.time() + timeout
+        for t in self.threads:
+            t.join(max(0.0, deadline - time.time()))
+        return not any(t.is_alive() for t in self.threads)
 
     def investigate(self, iid, ask=None):
         """Run the investigation to the end. `ask(incident_id, reason) -> bool` answers approvals synchronously
@@ -192,6 +207,8 @@ class Desk:
         steps, sent, root, report, result = [], None, None, None, None
         try:
             while True:
+                if self.stopping:  # the app moved on to another run; leave this incident where it is
+                    return None
                 try:
                     ev = gen.send(sent) if sent is not None else next(gen)
                 except StopIteration:
@@ -216,7 +233,10 @@ class Desk:
                     sent = self._decide(iid, tb, steps, ask)
                 self._save(iid, steps=steps)
         except Exception as ex:
-            self._save(iid, status="failed", reason=str(ex)[:300], steps=steps)
+            try:
+                self._save(iid, status="failed", reason=str(ex)[:300], steps=steps)
+            except Exception:
+                return None  # the store was closed under us (the app moved on to another run); nothing left to record
             notify.send(f"Patient Zero: investigation {iid} failed: {str(ex)[:120]}", iid)
             return self.get(iid)
         if not root:
@@ -250,6 +270,8 @@ class Desk:
             self.decisions[iid] = [ev, False]
             ev.wait()
             approved = self.decisions.pop(iid)[1]
+            if self.stopping:
+                return False
         steps.append({"type": "decision", "by": "person", "approved": approved,
                       "text": "Approved by a person." if approved else "Dismissed by a person. Nothing was changed."})
         self._save(iid, status="fixing" if approved else "investigating", steps=steps)

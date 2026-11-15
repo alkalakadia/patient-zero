@@ -12,10 +12,11 @@ ACTION_TYPES = ("tool_call", "memory_write")
 
 
 class Engine:
-    def __init__(self, store, brain=None, evidence=None):
+    def __init__(self, store, brain=None, evidence=None, votes=1):
         import re
         from .sim import scenario_of
         self.s, self.brain = store, brain
+        self.votes = votes  # replays per test with a real model; the majority decides (deterministic brains need 1)
         self.evidence = evidence  # trace-only mode: cause is shown by this value appearing in source and action
         self.value_re = re.compile(scenario_of(store)["value_re"])
         self._build_graph()
@@ -110,7 +111,9 @@ class Engine:
         # patient zero is the most upstream object whose removal changes the outcome
         # patient zero: confirmed, explains the most flagged actions (an agent's own task input explains only its own),
         # then the most upstream
-        candidates.sort(key=lambda c: (not c["confirmed"], -c["explains"], self.kb[c["object_id"]]["created_ts"]))
+        # ties (e.g. one bad action, explained by both its task and a shared note) go to the source that reached the most
+        # agent sessions: a task is read once, a poisoned shared note spreads
+        candidates.sort(key=lambda c: (not c["confirmed"], -c["explains"], -c["exposed_sessions"], self.kb[c["object_id"]]["created_ts"]))
         return candidates
 
     def _derived_memories(self, root):
@@ -129,10 +132,33 @@ class Engine:
         objs = {root} | self._derived_memories(root)
         return sorted({sid for o in objs for sid in self.readers.get(o, [])})
 
+    def _replays(self, sid, hidden, decided):
+        """Replay a session up to `votes` times, stopping once the majority can't change. decided(replays) -> bool.
+        A replay in which the agent did nothing at all is a failed run (models sometimes stop early), not evidence:
+        it is discarded and retried, up to twice the vote budget."""
+        out, did_something = [], bool(self.actions.get(sid))
+        for _ in range(self.votes * 2 if self.votes > 1 else 1):
+            r = replay_session(self.s, sid, hidden, self.brain)
+            if did_something and not r and self.votes > 1:
+                continue
+            out.append(r)
+            if len(out) >= self.votes or decided(out):
+                break
+        return out or [[]]
+
+    def _majority(self, e, replays):
+        """True if most replays did NOT reproduce the action (so the hidden source caused it)."""
+        return sum(not self._matches(e, r) for r in replays) * 2 > len(replays)
+
+    def _settled(self, events):
+        need = self.votes // 2 + 1
+        return lambda rs: all(max(sum(not self._matches(e, r) for r in rs), sum(self._matches(e, r) for r in rs)) >= need
+                              for e in events)
+
     def _action_changed(self, eid, hidden):
         e = self.event[eid]
-        replay = replay_session(self.s, e["session_id"], hidden, self.brain)
-        return not self._matches(e, replay)
+        replays = self._replays(e["session_id"], hidden, self._settled([e]))
+        return self._majority(e, replays)
 
     def _norm(self, tool, key, vals):
         """Compare actions by what matters, not wording: free text is reduced to the sensitive values it mentions."""
@@ -187,15 +213,18 @@ class Engine:
             return {**fwd, "confirmed": conf, "cleared": [e for e in fwd["suspects"] if e not in conf], "corrections": {}, "by": "evidence"}
         hidden = {root} | set(fwd["memories"])
         confirmed, cleared, corrections = [], [], {}
+        self.vote_log = {}
         for sid in fwd["sessions"]:
-            replay = replay_session(self.s, sid, hidden, self.brain)
-            for eid in self.actions.get(sid, []):
-                e = self.event[eid]
-                if self._matches(e, replay):
+            evs = [self.event[eid] for eid in self.actions.get(sid, [])]
+            replays = self._replays(sid, hidden, self._settled(evs))
+            for e in evs:
+                eid = e["event_id"]
+                self.vote_log[eid] = f"{sum(not self._matches(e, r) for r in replays)}/{len(replays)} replays changed"
+                if not self._majority(e, replays):
                     cleared.append(eid)
                 else:
                     confirmed.append(eid)
-                    corrections[eid] = self._counterpart(e, replay)
+                    corrections[eid] = self._counterpart(e, next(r for r in replays if not self._matches(e, r)))
         return {**fwd, "confirmed": confirmed, "cleared": cleared, "corrections": corrections}
 
     @staticmethod

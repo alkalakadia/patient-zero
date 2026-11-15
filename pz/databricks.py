@@ -77,6 +77,10 @@ class Delta:
         self.sql(f"CREATE {'OR REPLACE' if reset_payments else ''} TABLE {'' if reset_payments else 'IF NOT EXISTS '}{SCHEMA}.payments (item_id STRING, entity_id STRING, category STRING, amount DOUBLE, "
                  "value STRING, status STRING) TBLPROPERTIES (delta.enableChangeDataFeed = true)")
         self.sql(f"CREATE TABLE IF NOT EXISTS {SCHEMA}.edges (run_id STRING, src STRING, dst STRING, type STRING, ts BIGINT)")
+        # the agents' shared team memory: change data feed proves quarantines, time travel shows what an agent saw
+        self.sql(f"CREATE TABLE IF NOT EXISTS {SCHEMA}.team_memory (run_id STRING, object_id STRING, source STRING, written_by STRING, "
+                 "created_ts BIGINT, status STRING, text STRING) TBLPROPERTIES (delta.enableChangeDataFeed = true)")
+        self.mem_versions = []  # (session ts, team_memory version after that session's notes landed)
         self.versions = []  # (session ts, payments table version after that session) -> time travel for replays
         self.sql(f"CREATE TABLE IF NOT EXISTS {SCHEMA}.incidents (run_id STRING, root STRING, proven INT, cleared INT, rows_fixed INT, "
                  "created_at TIMESTAMP)")
@@ -142,6 +146,11 @@ class Delta:
                     kb, ts = c
                     for ch in b:
                         self._apply_change(ch)
+                    mem = [r for r in kb if r["kind"] == "memory"]
+                    if mem:
+                        self._insert("team_memory", [(self.run_id, r["object_id"], r["source"], r["created_by_session"], r["created_ts"],
+                                                      r["status"] or "active", r["text"]) for r in mem])
+                        self.mem_versions.append((ts, self._version("team_memory")))
                     if kb:
                         self._insert("knowledge", [(self.run_id, r["object_id"], r["kind"], r["source"], r["created_ts"], r["status"], r["text"]) for r in kb])
                         self._insert("kb_vectors", [(f"{self.run_id}:{r['object_id']}", self.run_id, r["object_id"], r["kind"], r["source"], r["text"]) for r in kb])
@@ -195,7 +204,7 @@ SELECT DISTINCT node FROM reach WHERE node <> :root"""
     # ---------- vector search: look-alikes of the poison ----------
     INDEX = f"{SCHEMA}.kb_index"
 
-    def find_similar(self, text, exclude=(), k=6, wait=20):
+    def find_similar(self, text, exclude=(), k=6, wait=20, min_score=0.6):
         """Semantic search over every knowledge doc and memory (this run and past runs) for look-alikes of the poison."""
         import time
         from databricks.sdk import WorkspaceClient
@@ -218,7 +227,8 @@ SELECT DISTINCT node FROM reach WHERE node <> :root"""
                                                   query_text=text, num_results=k + len(exclude))
         cols = [c.name for c in res.manifest.columns]
         rows = [dict(zip(cols, r)) for r in (res.result.data_array or [])]
-        return [r for r in rows if r["key"] not in exclude][:k]
+        # nearest neighbours always exist; only real look-alikes clear the bar (copies score ~0.77, unrelated docs ~0.44)
+        return [r for r in rows if r["key"] not in exclude and float(r.get("score") or 0) >= min_score][:k]
 
     # ---------- time travel ----------
     def items_as_of(self, ts):
@@ -227,6 +237,29 @@ SELECT DISTINCT node FROM reach WHERE node <> :root"""
         self.tt_versions = getattr(self, "tt_versions", set()) | {v}
         rows = self.sql(f"SELECT * FROM {SCHEMA}.payments VERSION AS OF {v}")
         return v, {r["item_id"]: {**r, "amount": float(r["amount"])} for r in rows}
+
+    def _version(self, table):
+        return self.sql(f"DESCRIBE HISTORY {SCHEMA}.{table} LIMIT 1")[0]["version"]
+
+    def memory_as_of(self, ts):
+        """Team memory exactly as an agent saw it when its session started (Delta time travel)."""
+        self.flush()
+        v = max([ver for t, ver in getattr(self, "mem_versions", []) if t < ts], default=None)
+        if v is None:
+            return None, []
+        rows = self.sql(f"SELECT object_id, source, status, text FROM {SCHEMA}.team_memory VERSION AS OF {v} WHERE run_id = :r", {"r": self.run_id})
+        return v, rows
+
+    def quarantine_memory(self, object_ids):
+        """Quarantine poisoned notes in Delta; the change data feed is the before/after proof."""
+        self.flush()
+        start = self._version("team_memory") + 1
+        for oid in object_ids:
+            self.sql(f"UPDATE {SCHEMA}.team_memory SET status = 'quarantined' WHERE run_id = :r AND object_id = :o", {"r": self.run_id, "o": oid})
+        cdf = self.sql(f"SELECT object_id, status, _change_type, _commit_version FROM table_changes('{SCHEMA}.team_memory', {start}) "
+                       "WHERE run_id = :r ORDER BY _commit_version, object_id, _change_type DESC", {"r": self.run_id}) \
+            if self._version("team_memory") >= start else []
+        return {"from_version": start, "changes": cdf, "link": self.table_link("team_memory")}
 
     # ---------- cleanup in Delta ----------
     def apply_cleanup(self, reverted, incident):
