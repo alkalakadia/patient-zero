@@ -574,6 +574,8 @@ def github_info():
         om = load_run(out["recorded"]["databricks"])
         out["open_model_said"] = [e["text"] for e in om.events if e["type"] == "say"][:3]
         out["open_model_poisoned"] = om.store.one("SELECT COUNT(*) n FROM ground_truth WHERE poisoned=1")["n"]
+        from .github_run import github_links
+        out["closed"] = github_links(om.store)["closed"]
         out["claude_poisoned"] = cc.store.one("SELECT COUNT(*) n FROM ground_truth WHERE poisoned=1")["n"]
         inv = om.investigation or []
         res = next((e for e in inv if e.get("type") == "tool_result" and e.get("name") == "apply_cleanup"), None)

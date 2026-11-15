@@ -376,4 +376,7 @@ def github_links(store):
     out = {"repo": f"https://github.com/{REPO}", "commits": f"https://github.com/{REPO}/commits/main"}
     prs = [json.loads(e["payload"]).get("url") for e in store.q("SELECT payload FROM events WHERE tool='open_pull_request'")]
     out["pull_requests"] = [p for p in prs if p]
+    merged = {r["row_key"] for r in store.q("SELECT row_key FROM events WHERE tool='merge'")}
+    out["closed"] = [json.loads(e["payload"]).get("url") for e in store.q("SELECT row_key, payload FROM events WHERE tool='open_pull_request' ORDER BY ts")
+                     if e["row_key"] not in merged and json.loads(e["payload"]).get("url")]  # the ones Patient Zero closed instead of reverting
     return out
