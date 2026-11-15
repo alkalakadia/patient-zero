@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -9,7 +10,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import databricks, investigator
+from . import databricks, detector, incidents, investigator
 from .claude_brain import ClaudeBrain
 from .live import ATTACK_TEMPLATE, LiveRun
 from .engine import Engine
@@ -37,21 +38,139 @@ app = FastAPI(title="Patient Zero")
 state = {}
 
 
-def load(scenario=DEFAULT, attack=None):
-    keep = {k: state[k] for k in ("live", "dashboard_url") if k in state}
-    # Windows can't delete the SQLite file while it's open, so close the old store before rebuilding.
-    live, old = state.get("live"), state.get("store")
-    if old is not None and not (live and old is getattr(live, "store", None)):
-        old.close()
-    state.clear()
-    state.update(keep)
+def load(scenario=DEFAULT, attack=None, autopilot=None):
+    """Build a simulated week and open its incident desk. `autopilot` overrides the saved setting for this desk only."""
+    keep = {k: state[k] for k in ("live", "dashboard_url", "paid_runs") if k in state}
+    # Each simulated week gets its own database file, and the previous one is never closed by hand: another request or an
+    # investigation thread may still be reading it, and closing SQLite under a running thread crashes Python. It is freed
+    # once nothing holds it, and its file is deleted on a later load (Windows can't delete a file that is still open).
+    if state.get("desk"):
+        state["desk"].stop()
     sc = SCENARIOS[scenario]
-    store = build(scenario=scenario, attack=attack)
-    state.update(store=store, engine=Engine(store), scenario=scenario, sc=sc,
+    path = DB_PATH.parent / f"sim_{uuid.uuid4().hex[:8]}.db"
+    store = build(path, scenario=scenario, attack=attack)
+    fresh = dict(keep, store=store, engine=Engine(store), scenario=scenario, sc=sc,
                  attack={**attack_defaults(sc), **(attack or {})}, verdict=None, approval=None)
+    state.clear()  # swap in one step, so requests in flight see the old week or the new one, not a half-built one
+    state.update(fresh)
+    for f in DB_PATH.parent.glob("sim_*.db"):
+        if f != path:
+            try:
+                f.unlink()
+            except OSError:
+                pass  # still open somewhere (Windows); a later load removes it
+    _open_desk(autopilot)
 
 
-load()
+# ---------------- the incident desk: detect, contain, investigate, fix (pz/incidents.py) ----------------
+
+def _kind():
+    return "import" if state.get("imported") else "github" if state.get("github") else "sim"
+
+
+def _toolbox(eng, sc, store, github, run):
+    """A fresh investigator toolbox for this run, wired to its system of record (Delta, GitHub)."""
+    tb = investigator.Toolbox(eng, sc, lambda n: label(n, eng, sc), agent_name)
+    if github:
+        from .github_run import GithubCleanup
+        tb.github = GithubCleanup(store)
+        tb.delta = getattr(run, "delta", None)
+    if run and run.delta:
+        tb.delta = run.delta
+        tb.on_cleanup = lambda result: {**run.delta.apply_cleanup(result["reverted"], {"root": result["quarantined"][0] if result["quarantined"] else "",
+                                                                                      "proven": len(tb.verdict["confirmed"]),
+                                                                                      "cleared": len(tb.verdict["cleared"])}),
+                                        "link": run.delta.table_link("payments")}
+    return tb
+
+
+def _ui_event(ev):
+    """An investigation event as the UI shows it (same shape as the /api/investigate stream)."""
+    if ev["type"] == "tool_result":
+        return {**ev, "data": _ui_data(ev["name"], ev["data"])}
+    if ev["type"] == "approval":
+        return {"type": "approval", "summary": ev["summary"], "note": ev.get("note"), "rows": _plan_rows(ev["plan"]),
+                "checklist": ev["plan"]["checklist"][:3]}
+    return ev
+
+
+def _open_desk(autopilot=None):
+    """Point the incident desk at the current run, then detect, contain and (when it's free or was asked for) investigate."""
+    eng, sc, store, kind = state["engine"], state["sc"], state["store"], _kind()
+    run = state.get("live")
+    adopted = bool(run and state.get("adopted") == run.id)
+    paid_ok = adopted and run.id in state.get("paid_runs", set())  # a live run someone started: its replays were asked for
+    free = kind == "import" or eng.brain is None                    # evidence mode, or rule-based agents: no model calls
+    recorded = ({"steps": run.investigation, "verdict": run.verdict}
+                if adopted and not paid_ok and getattr(run, "investigation", None) else None)
+    use_claude = not free and investigator.claude_available()
+    driver = investigator.scripted_import if kind == "import" else investigator.claude if use_claude else investigator.scripted
+    github = kind == "github"
+    desk = incidents.Desk(store, sc, kind, eng.evidence if kind == "import" else None,
+                          toolbox=lambda: _toolbox(eng, sc, store, github, run if adopted else None), driver=driver, fmt=_ui_event,
+                          delta=getattr(run, "delta", None) if adopted else None, recorded=recorded, investigate=free or paid_ok,
+                          autopilot=autopilot)
+    state["desk"] = desk
+    if recorded and recorded["verdict"]:
+        state["verdict"] = recorded["verdict"]
+    desk.scan()
+    desk.resume()
+    return desk
+
+
+def _contain_during(run, sc, kind):
+    """Between sessions of a live run: detect and contain right away (no model calls). Returns a line for the feed."""
+    opened = incidents.Desk(run.store, sc, kind, investigate=False).scan(investigate=False)
+    if not opened:
+        return None
+    vals = [r["value"] for r in run.store.q("SELECT value FROM incidents WHERE incident_id IN (%s)" % ",".join("?" * len(opened)), opened)]
+    return (f"Patient Zero opened {len(opened)} incident(s) and contained them: holding any action that carries "
+            f"{', '.join(vals)} and withdrawing the knowledge that contains it.")
+
+
+class SettingsReq(BaseModel):
+    autopilot: bool
+
+
+@app.get("/api/settings")
+def get_settings():
+    return incidents.settings()
+
+
+@app.post("/api/settings")
+def set_settings(req: SettingsReq):
+    return incidents.update_settings(autopilot=req.autopilot)
+
+
+@app.get("/api/incidents")
+def incidents_list():
+    desk = state.get("desk")
+    return {"settings": incidents.settings(), "incidents": desk.list() if desk else []}
+
+
+@app.get("/api/incidents/{iid}")
+def incident_get(iid: str):
+    desk = state.get("desk")
+    inc = desk and desk.get(iid)
+    if not inc:
+        raise HTTPException(404, "unknown incident")
+    if desk.verdicts.get(iid):
+        state["verdict"] = desk.verdicts[iid]  # so clicking an action explains it against this incident
+    return inc
+
+
+@app.post("/api/incidents/{iid}/{action}")
+def incident_action(iid: str, action: str):
+    desk = state.get("desk")
+    if not desk or action not in ("approve", "dismiss", "undo"):
+        raise HTTPException(404)
+    try:
+        out = getattr(desk, action)(iid)
+    except KeyError:
+        raise HTTPException(404, "unknown incident")
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+    return {"ok": True, "result": out if isinstance(out, str) else None, "incident": desk.get(iid, full=False)}
 
 
 def agent_name(agent_id):
@@ -214,27 +333,21 @@ def incident(root: str = ""):
 
 @app.get("/api/alerts")
 def alerts():
-    """A plain detection rule produces the symptom: a sensitive value no known entity owns."""
-    s = state["store"]
-    if state.get("imported"):
-        ind = state["engine"].evidence
-        from .mlflow_import import _norm
-        return [{"event_id": e["event_id"], "agent": agent_name(e["agent_id"]), "role": "primary", "row": e["row_key"], "value": ind,
-                 "amount": "", "day": 1, "text": label(e["event_id"])}
-                for e in s.q("SELECT * FROM events WHERE type='tool_call' ORDER BY ts") if ind in _norm(e["payload"])]
-    if state.get("github"):
-        from .monitor import github_alerts
-        return [{"event_id": a["event_id"], "agent": agent_name(a["agent_id"]), "role": "primary", "row": a["row"], "value": a["value"],
-                 "amount": "PR", "day": 1, "text": f"{a['title']} \u2192 sends data to {a['value']}"} for a in github_alerts(s, state["sc"])]
-    owned = {r["value"] for r in s.q("SELECT value FROM entities")}
+    """The detection rules (pz/detector.py) as a list for the UI: a value no known entity owns, a host nobody allowed,
+    or the indicator from an imported alert."""
+    s, eng, kind = state["store"], state["engine"], _kind()
     out = []
-    for e in s.q("SELECT * FROM events WHERE tool IN ('create_item','change_value') ORDER BY ts"):
-        val = json.loads(e["payload"]).get("value")
-        if val and val not in owned:
+    for a in detector.flagged(s, state["sc"], kind, eng.evidence if kind == "import" else None):
+        e = eng.event[a["event_id"]]
+        if kind == "github":
+            text, amount, role = f"{json.loads(e['payload'])['title']} \u2192 sends data to {a['value']}", "PR", "primary"
+        elif kind == "import":
+            text, amount, role = label(e["event_id"]), "", "primary"
+        else:
             row = s.get_row("items", e["row_key"]) or {}
-            out.append({"event_id": e["event_id"], "agent": agent_name(e["agent_id"]), "role": _role(e["agent_id"]),
-                        "row": e["row_key"], "value": val, "amount": fmt_amount(state["sc"], row.get("amount") or 0),
-                        "day": e["ts"] // 1000, "text": label(e["event_id"])})
+            text, amount, role = label(e["event_id"]), fmt_amount(state["sc"], row.get("amount") or 0), _role(e["agent_id"])
+        out.append({"event_id": e["event_id"], "agent": agent_name(e["agent_id"]), "role": role, "row": e["row_key"],
+                    "value": a["value"], "amount": amount, "day": 1 if kind != "sim" else e["ts"] // 1000, "text": text})
     return out
 
 
@@ -245,7 +358,7 @@ def _role(agent_id):
 @app.get("/api/graph")
 def graph():
     s, eng = state["store"], state["engine"]
-    nodes = [{"id": o["object_id"], "kind": o["kind"], "source": o["source"], "ts": o["created_ts"], "text": o["text"]}
+    nodes = [{"id": o["object_id"], "kind": o["kind"], "source": o["source"], "ts": o["created_ts"], "text": o["text"], "status": o["status"]}
              for o in s.q("SELECT * FROM kb ORDER BY created_ts")]
     for x in s.q("SELECT * FROM sessions ORDER BY ts"):
         acts = [eng.event[e] for e in eng.actions.get(x["session_id"], [])]
@@ -278,8 +391,10 @@ def live_start(req: LiveReq):
     if state.get("live") and not state["live"].done:
         raise HTTPException(409, "a live run is already in progress")
     text = (req.attack_text or "").strip() or None
-    run = LiveRun(attack_text=text, use_databricks=req.use_databricks).start()
-    state["live"] = run
+    run = LiveRun(attack_text=text, use_databricks=req.use_databricks)
+    run.on_session_end = lambda sid: _contain_during(run, run.sc, "sim")
+    state.setdefault("paid_runs", set()).add(run.id)
+    state["live"] = run.start()
     state.pop("github", None)
     return {"run_id": run.id, "databricks": run.use_databricks}
 
@@ -400,6 +515,7 @@ def _adopt_live(run):
         run.store.time_travel = lambda ts: run.delta.items_as_of(ts)[1]  # replays read payments via Delta time travel
     state.update(store=run.store, engine=Engine(run.store, brain=type(run.brain)(run.sc)), scenario="inbox", sc=run.sc,
                  attack={"value": run.attacker_value}, verdict=None, approval=None, adopted=run.id)
+    _open_desk()
 
 
 # ---------------- import an agent's existing MLflow traces ----------------
@@ -419,11 +535,12 @@ def import_mlflow(req: ImportReq):
         run = ImportRun(req.experiment, req.indicator).run()
     except Exception as ex:
         raise HTTPException(400, f"could not import traces: {str(ex)[:200]}")
-    keep = {k: state[k] for k in ("dashboard_url",) if k in state}
+    keep = {k: state[k] for k in ("dashboard_url", "paid_runs") if k in state}
     state.clear()
     state.update(keep)
     state.update(live=run, store=run.store, engine=Engine(run.store, evidence=_norm(req.indicator)), scenario="mlflow_import",
                  sc=MLFLOW_IMPORT, attack={}, verdict=None, approval=None, adopted=run.id, imported=True)
+    _open_desk()
     return {"run_id": run.id, "sessions": run.store.one("SELECT COUNT(*) n FROM sessions")["n"]}
 
 
@@ -491,8 +608,11 @@ def github_start(req: GhStartReq):
         raise HTTPException(400, "agent must be databricks or claude-code")
     if state.get("live") and not state["live"].done:
         raise HTTPException(409, "a run is already in progress")
+    from .scenarios import GITHUB_LIVE
     run = GithubRun(agent=req.agent)
     run.reset_first = True
+    run.on_session_end = lambda sid: _contain_during(run, GITHUB_LIVE, "github")
+    state.setdefault("paid_runs", set()).add(run.id)
     state["live"] = run.start()
     state["github"] = True
     state.pop("adopted", None)
@@ -512,6 +632,7 @@ def _adopt_github(run):
                  adopted=run.id, github=True)
     if run.investigation:
         run.investigation = _with_ui_data(run)
+    _open_desk()
 
 
 def _with_ui_data(run):
@@ -542,19 +663,8 @@ async def investigate(event_ids: str, mode: str = "auto"):
     eng = state["engine"]
     if not ids or any(e not in eng.event for e in ids):
         raise HTTPException(404, "unknown event")
-    sc = state["sc"]
-    tb = investigator.Toolbox(eng, sc, lambda n: label(n, eng, sc), agent_name)
-    if state.get("github"):
-        from .github_run import GithubCleanup
-        tb.github = GithubCleanup(state["store"])
-        tb.delta = getattr(state.get("live"), "delta", None)
-    run = state.get("live")
-    if run and state.get("adopted") == run.id and run.delta:
-        tb.delta = run.delta
-        tb.on_cleanup = lambda result: {**run.delta.apply_cleanup(result["reverted"], {"root": result["quarantined"][0] if result["quarantined"] else "",
-                                                                                      "proven": len(tb.verdict["confirmed"]),
-                                                                                      "cleared": len(tb.verdict["cleared"])}),
-                                        "link": run.delta.table_link("payments")}
+    sc, run = state["sc"], state.get("live")
+    tb = _toolbox(eng, sc, state["store"], state.get("github"), run if run and state.get("adopted") == run.id else None)
     use_claude = not state.get("imported") and (mode == "claude" or (mode == "auto" and investigator.claude_available()))
     driver = investigator.scripted_import if state.get("imported") else investigator.claude if use_claude else investigator.scripted
     gen = driver(tb, ids)
@@ -719,3 +829,6 @@ app.mount("/static", StaticFiles(directory=WEB), name="static")
 @app.get("/")
 def index():
     return FileResponse(WEB / "index.html")
+
+
+load()  # last, so the startup investigation can use everything defined above

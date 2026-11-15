@@ -231,6 +231,26 @@ main{margin-top:6px}
 .links a{border-color:var(--green-line);color:var(--green);background:var(--green-bg)}
 .pill{font:700 11px var(--mono);padding:3px 9px;border-radius:999px;background:var(--red-bg);color:var(--red)}
 code{font-family:var(--mono);font-size:.9em;background:var(--panel2);padding:1px 5px;border-radius:5px}
+/* incident desk: the table at the top of the sidebar + the autopilot switch in the header */
+#incDesk{border-bottom:1px solid var(--line);padding:10px 14px 6px;max-height:32vh;overflow:auto;background:var(--panel2);flex:none}
+#incDesk .ih{display:flex;align-items:center;gap:8px;font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+#incDesk .ih b{color:var(--text)}
+#incDesk table{margin:0;font-size:11.5px}
+#incDesk td,#incDesk th{padding:5px 4px}
+#incDesk tr.inc{cursor:pointer}
+#incDesk tr.inc:hover td{background:var(--panel)}
+#incDesk tr.sel td{background:var(--amber-bg)}
+#incDesk .empty{font-size:12.5px;color:var(--muted);padding:4px 0 6px}
+.ipill{font:700 10.5px var(--mono);padding:2px 7px;border-radius:999px;white-space:nowrap;background:var(--line);color:var(--muted)}
+.ipill.red{background:var(--red-bg);color:var(--red)} .ipill.amber{background:var(--amber-bg);color:var(--amber)} .ipill.green{background:var(--green-bg);color:var(--green)}
+.apt{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--sage);cursor:pointer;white-space:nowrap;user-select:none}
+.apt input{display:none}
+.apt .sw{width:34px;height:20px;border-radius:999px;background:rgba(204,201,161,.3);position:relative;transition:.2s;flex:none}
+.apt .sw:after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:var(--sage);transition:.2s}
+.apt input:checked + .sw{background:#B5C46A}
+.apt input:checked + .sw:after{left:17px;background:var(--ink)}
+.apt input:checked ~ span{color:#F0FFCE}
+.apt input:focus-visible + .sw{outline:3px solid var(--amber2);outline-offset:2px}
 @media (max-width:1000px){main{grid-template-columns:1fr;grid-template-rows:45vh 1fr}#side{border-left:0;border-top:1px solid var(--line)}.stages{display:none}}
 </style>
 </head>
@@ -238,6 +258,7 @@ code{font-family:var(--mono);font-size:.9em;background:var(--panel2);padding:1px
 <header>
   <div class="logo"><span class="pulse"></span>Patient Zero <span class="tagline"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 3.5l6 6"/><path d="M17.5 6.5l-7 7"/><path d="M10.5 13.5l-2.5-2.5-4.2 4.2a3 3 0 0 0 0 4.3h0a3 3 0 0 0 4.3 0l4.2-4.2z"/></svg>Let's dig in</span></div>
   <div class="stages" id="stages"></div>
+  <label class="apt" title="On: fixes proven by replay are applied automatically; anything else waits for you. Off: every fix waits for your approval."><input type="checkbox" id="apToggle" checked><span class="sw"></span><span id="apLabel">Autopilot</span></label>
   <button class="hbtn" id="toPicker">Home</button>
 </header>
 <main>
@@ -250,6 +271,7 @@ code{font-family:var(--mono);font-size:.9em;background:var(--panel2);padding:1px
     <div id="explain"></div>
   </section>
   <aside id="side">
+    <div id="incDesk"></div>
     <div id="sideHead"></div>
     <div id="sideBody"></div>
     <div id="sideFoot"></div>
@@ -346,6 +368,7 @@ function append(html){ const b = $('#sideBody'); b.insertAdjacentHTML('beforeend
 /* ---------------- scenario picker ---------------- */
 async function showPicker(){
   if (es) es.close();
+  incRun++; openInc = null;
   const my = ++runId;
   setStage(0);
   if (!SC.length) SC = await api('/api/scenarios');
@@ -395,7 +418,8 @@ function buildGraph(){
     else { x = xOf(n.ts); y = laneY(0) + (n.kind === 'memory' ? 28 : -32); }
     const poison = n.source && /edit|ticket|email|issue|compromised|chat/i.test(n.source);
     els.push({data:{id:n.id, label:n.kind === 'session' ? (GHL ? (ghX['lbl_' + n.id] || (n.agent_name === 'Intake pipeline' ? '' : 'merge')) : '') : n.id, color:ROLE_COLOR[n.role] || '#88665D'}, position:{x, y},
-      classes:[n.kind, poison ? 'poison' : '', (n.kind === 'session' || n.ts > 0) ? 'hidden' : ''].join(' ')});
+      classes:[n.kind, poison ? 'poison' : '', (n.kind === 'session' || n.ts > 0) ? 'hidden' : '',
+               n.status === 'quarantined' ? 'quar' : n.status === 'suspect' ? 'withdrawn' : ''].join(' ')});
   });
   (GHL ? [['Issues & team memory',0],[ag.primary[1],1],[ag.reviewer[1],2]] : [['Docs & memory',0],[ag.primary[1],1],[ag.reviewer[1],2],[ag.notifier[1],3],['Nightly job',4]]).forEach(([t,i]) =>
     els.push({data:{id:'lane'+i, label:t}, position:{x:-110, y:laneY(i)}, classes:'lane'}));
@@ -424,6 +448,7 @@ function buildGraph(){
       {selector:'node.root', style:{'background-color':'#A53F2B','border-width':5,'border-color':'#E8985E','width':70,'height':38,'font-size':15,'z-index':20}},
       {selector:'node.memory.root', style:{'width':44,'height':44}},
       {selector:'node.ruled', style:{'border-width':3,'border-color':'#5F6B24','opacity':1}},
+      {selector:'node.withdrawn', style:{'border-width':3,'border-style':'dashed','border-color':'#E8985E'}},
       {selector:'node.quar', style:{'background-opacity':.15,'border-width':3,'border-style':'dashed','border-color':'#A53F2B','color':'#A53F2B'}},
       {selector:'edge.hot', style:{'line-color':'#A53F2B','width':1.6,'opacity':.75}},
       {selector:'edge.chain', style:{'line-color':'#141204','width':4,'opacity':1,'z-index':10}},
@@ -504,63 +529,142 @@ async function playWeek(run){
   showAlerts();
 }
 
-/* ---------------- alerts ---------------- */
+/* ---------------- incident desk: alerts become incidents, contained and investigated without a prompt ---------------- */
+const TOOL_LABEL = {get_alert:'Reading the alert', trace_back:'Digging to the source', find_lookalikes:'Looking for copies', trace_forward:'Mapping the spread', replay_sessions:'Testing each action', plan_cleanup:'Planning the fix', apply_cleanup:'Applying the fix', request_approval:'Asking you'};
+const ST = {contained:['amber','contained'], investigating:['amber','investigating'], awaiting_investigation:['amber','ready to investigate'],
+            awaiting_approval:['red','needs you'], fixing:['amber','fixing'], fixed:['green','fixed'], dismissed:['','dismissed'],
+            undone:['','undone'], failed:['red','failed'], recorded:['green','recorded']};
+const FINAL = ['fixed','dismissed','undone','failed','recorded'];
+let INC = [], AUTOPILOT = true, openInc = null, incRun = 0;
+const ipill = st => { const [c, t] = ST[st] || ['', st]; return `<span class="ipill ${c}">${t}</span>`; };
+
+async function refreshDesk(){
+  let d; try { d = await api('/api/incidents'); } catch(e){ return; }
+  INC = d.incidents; AUTOPILOT = d.settings.autopilot;
+  $('#apToggle').checked = AUTOPILOT; $('#apLabel').textContent = AUTOPILOT ? 'Autopilot on' : 'Autopilot off';
+  const need = INC.filter(i => i.status === 'awaiting_approval' || i.status === 'awaiting_investigation').length;
+  $('#incDesk').innerHTML = `<div class="ih">Incidents <b>${INC.length}</b>${need ? `<span class="ipill red">${need} need you</span>` : ''}</div>`
+    + (INC.length ? `<table><thead><tr><th>Status</th><th>Source</th><th>Flagged value</th><th title="actions proven caused by it">Proven</th><th title="changes undone">Fixed</th><th title="actions held while it was open">Held</th></tr></thead><tbody>`
+      + INC.map(i => `<tr class="inc ${openInc === i.incident_id ? 'sel' : ''}" data-inc="${esc(i.incident_id)}"><td>${ipill(i.status)}</td><td>${esc(i.root || '…')}</td><td>${esc(i.value)}</td>
+          <td>${i.report ? i.report.proven : '·'}</td><td>${i.report ? i.report.fixed : '·'}</td><td>${i.held}</td></tr>`).join('') + '</tbody></table>'
+      : `<div class="empty">No incidents. Detection rules watch every recorded action.</div>`);
+  document.querySelectorAll('#incDesk tr.inc').forEach(r => r.onclick = () => showIncident(r.dataset.inc));
+}
+$('#apToggle').onchange = async e => { await api('/api/settings', {autopilot: e.target.checked}); refreshDesk(); };
+setInterval(() => { if (!$('#picker').classList.contains('on')) refreshDesk(); }, 2000);
+
+function deskNote(){
+  const ids = INC.map(i => i.value);
+  if (!INC.length) return '';
+  return `<div class="callout green">Patient Zero already opened ${INC.length === 1 ? 'an incident' : INC.length + ' incidents'} for this and <b>contained it right away</b>: any action that carries ${ids.map(v => `<b>${esc(v)}</b>`).join(', ')} is held, and the text that contains it is hidden from every agent. Then it dug in on its own.
+    ${AUTOPILOT ? '<b>Autopilot is on:</b> a fix it proves by replay, with no conflicting changes, is applied for you. Anything else waits for you.' : '<b>Autopilot is off:</b> every fix waits for your OK.'} The switch is at the top.</div>`;
+}
+function openIncident(){ const i = INC.find(x => x.status === 'awaiting_approval' || x.status === 'awaiting_investigation') || INC[0]; if (i) showIncident(i.incident_id); }
+
 async function showAlerts(){
   setStage(2);
+  await refreshDesk();
+  const dig = `<button class="btn warm cta" id="hand"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 3.5l6 6"/><path d="M17.5 6.5l-7 7"/><path d="M10.5 13.5l-2.5-2.5-4.2 4.2a3 3 0 0 0 0 4.3h0a3 3 0 0 0 4.3 0l4.2-4.2z"/></svg>Dig in</button>`;
   if (LIVE && LIVE.kind === 'github'){
     const inc = await api('/api/incident').catch(() => ({victims: []}));
     head(`<div class="av" style="background:var(--red)">!</div><div><div class="t">Security monitor</div><div class="s">Code that sends data to a website that is not approved</div></div>`);
     body(`<div class="kicker" style="color:var(--red)">Something looks wrong</div><h1>${inc.victims.length} pull request${inc.victims.length === 1 ? '' : 's'} send data to an unknown website</h1>
       <p>The coding agent wrote this code itself. You can't tell yet <b>why</b> it did, whether other changes are affected, or what to undo.</p>
+      ${deskNote()}
       ${inc.victims.map(v => victimHTML(v, [v.did.split('sends data to ').pop()])).join('')}`);
-    foot(`<button class="btn warm cta" id="hand"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 3.5l6 6"/><path d="M17.5 6.5l-7 7"/><path d="M10.5 13.5l-2.5-2.5-4.2 4.2a3 3 0 0 0 0 4.3h0a3 3 0 0 0 4.3 0l4.2-4.2z"/></svg>Dig in</button>`);
-    $('#hand').onclick = investigate;
+    foot(INC.length ? dig : '');
+    if (INC.length) $('#hand').onclick = openIncident;
     return;
   }
   head(`<div class="av" style="background:var(--amber2);color:var(--ink)">!</div><div><div class="t">Alerts</div><div class="s">Unknown ${esc(OV.field)} spotted</div></div>`);
-  const reviewerPick = ALERTS.some(a => a.role === 'reviewer');
   body(`<div class="kicker">Something looks wrong</div><h1>${ALERTS.length} suspicious actions</h1>
     <p>Each uses a ${esc(OV.field)} nobody recognizes. Where did it come from?</p>
-    <div class="alerts">${ALERTS.slice(0,8).map(a => `<div class="al ${a.event_id===selected?'sel':''}" data-id="${a.event_id}"><div><div class="r">${esc(a.text)}</div><div class="m">${esc(a.agent)} · day ${a.day}</div></div><div class="amt">${esc(a.amount)}</div></div>`).join('')}</div>
-    ${reviewerPick ? `<p class="muted" style="font-size:13px">We picked one for you. Click another to switch.</p>` : ''}`);
-  foot(`<button class="btn warm cta" id="hand"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 3.5l6 6"/><path d="M17.5 6.5l-7 7"/><path d="M10.5 13.5l-2.5-2.5-4.2 4.2a3 3 0 0 0 0 4.3h0a3 3 0 0 0 4.3 0l4.2-4.2z"/></svg>Dig in</button>`);
+    ${deskNote()}
+    <div class="alerts">${ALERTS.slice(0,8).map(a => `<div class="al ${a.event_id===selected?'sel':''}" data-id="${a.event_id}"><div><div class="r">${esc(a.text)}</div><div class="m">${esc(a.agent)} · day ${a.day}</div></div><div class="amt">${esc(a.amount)}</div></div>`).join('')}</div>`);
+  if (ALERTS.some(a => a.role === 'reviewer')) $('#sideBody').insertAdjacentHTML('beforeend', `<p class="muted" style="font-size:13px">We picked one for you. Click another to switch.</p>`);
+  foot(INC.length ? dig : '');
   const spot = () => { cy.$('.spot').removeClass('spot'); const n = cy.$id(sidOf(selected)).addClass('spot'); cy.animate({center:{eles:n}, zoom:.9, duration:500}); };
   document.querySelectorAll('.al').forEach(el => el.onclick = () => { document.querySelectorAll('.al').forEach(x => x.classList.remove('sel')); el.classList.add('sel'); selected = el.dataset.id; spot(); });
-  spot();
-  $('#hand').onclick = investigate;
+  if (selected) spot();
+  if (INC.length) $('#hand').onclick = openIncident;
 }
 
-/* ---------------- the Patient Zero agent ---------------- */
-const TOOL_LABEL = {get_alert:'Reading the alert', trace_back:'Digging to the source', find_lookalikes:'Looking for copies', trace_forward:'Mapping the spread', replay_sessions:'Testing each action', plan_cleanup:'Planning the fix', apply_cleanup:'Applying the fix', request_approval:'Asking you'};
-
-function investigate(){
-  setStage(3); hint(''); cy.$('.spot').removeClass('spot');
+async function showIncident(id){
+  const my = ++incRun; openInc = id;
+  if (es) es.close();
+  if (cy){ cy.elements().removeClass('hidden spot dim ruled exposed infected cleared root chain hot'); }
+  setStage(3); hint(''); $('#explain').classList.remove('on');
   head(`<div class="av pz live" id="pzav">PZ</div><div><div class="t">Patient Zero</div><div class="s" id="pzs">Starting</div></div><span class="chip" id="mode">…</span>`);
+  $('#mode').style.display = 'none';  // autopilot / human-in-the-loop state lives in the sidebar table and the header switch
   body(''); foot('');
-  let lastTool = null;
-  const queue = []; let draining = false;
-  const drain = async () => { if (draining) return; draining = true; while (queue.length) await handle(queue.shift()); draining = false; };
-  const url = LIVE && LIVE.replay && LIVE.links && LIVE.links.investigated ? '/api/investigate/replay'
-            : LIVE && LIVE.kind === 'import' ? '/api/investigate?event_ids=' + encodeURIComponent(ALERTS.map(a => a.event_id).join(','))
-            : '/api/investigate?event_ids=' + encodeURIComponent(LIVE && LIVE.kind === 'github' ? ALERTS.map(a => a.event_id).join(',') : selected) + (LIVE ? '&mode=claude' : '');
-  es = new EventSource(url);
-  es.onmessage = m => { queue.push(JSON.parse(m.data)); drain(); };
-  es.onerror = () => es.close();
-  async function handle(ev){
-    if (ev.type === 'mode'){ $('#mode').style.display = 'none'; }
-    if (ev.type === 'status') $('#pzs').textContent = ev.text.replace(/\s*\(.*?\)/g, '');
-    if (ev.type === 'thought') append(`<div class="ev thought fade"><div class="dot">PZ</div><div class="txt">${esc(ev.text)}</div></div>`);
-    if (ev.type === 'tool_call') lastTool = append(`<div class="ev tool fade"><div class="h"><span>${esc(LIVE && LIVE.kind === 'import' && ev.name === 'replay_sessions' ? 'Sorting by evidence' : TOOL_LABEL[ev.name] || ev.name)}</span><span class="st"><span class="spin"></span></span></div><div class="b"></div></div>`);
-    if (ev.type === 'tool_result'){
-      if (lastTool){ lastTool.classList.add('done'); lastTool.querySelector('.st').innerHTML = '<span class="ok">✓ Done</span>'; lastTool.querySelector('.b').innerHTML = toolBody(ev); }
-      await animateTool(ev);
-      if (ev.name === 'trace_back' && ev.data && ev.data.root && LIVE && LIVE.kind === 'github') await showPatientZero(ev.data.root);
+  refreshDesk();
+  let shown = 0, lastTool = null, waiting = false;
+  while (my === incRun){
+    let inc; try { inc = await api('/api/incidents/' + encodeURIComponent(id)); } catch(e){ body(`<div class="callout">${esc(e.message)}</div>`); return; }
+    if (!shown && inc.reason && (inc.status === 'awaiting_investigation' || inc.status === 'contained'))
+      append(`<div class="callout" style="border-color:var(--amber)">${esc(inc.reason)}</div>`);
+    for (; shown < inc.steps.length; shown++){
+      if (my !== incRun) return;
+      lastTool = await renderStep(inc.steps[shown], lastTool, inc);
     }
-    if (ev.type === 'approval'){ setStage(4); approval(ev); }
-    if (ev.type === 'report'){ setStage(5); showReport(ev.data); }
-    if (ev.type === 'error') append(`<div class="callout">${esc(ev.text)}</div>`);
-    if (ev.type === 'done'){ es.close(); $('#pzav').classList.remove('live'); $('#pzs').textContent = 'Finished'; }
+    const asks = inc.status === 'awaiting_approval' || inc.status === 'awaiting_investigation';
+    if (asks && !waiting){
+      waiting = true; setStage(4); $('#pzs').textContent = 'Waiting for you';
+      // autopilot was on but its policy refused: say why (when autopilot is off, the approval card is the whole story)
+      if (inc.status === 'awaiting_approval' && inc.mode === 'autopilot') append(`<div class="callout" style="border-color:var(--red)"><b>Autopilot left this one to you:</b> ${esc(inc.reason || '')}</div>`);
+      foot(`<button class="btn line" id="iDismiss">Decline</button><button class="btn green cta" id="iApprove">${inc.status === 'awaiting_investigation' ? 'Investigate now' : 'Approve fix'}</button>`);
+      const act = async a => { foot(''); try { await api(`/api/incidents/${encodeURIComponent(id)}/${a}`, {}); } catch(e){ append(`<div class="callout">${esc(e.message)}</div>`); } waiting = false; refreshDesk(); };
+      $('#iApprove').onclick = () => act('approve'); $('#iDismiss').onclick = () => act('dismiss');
+    }
+    if (FINAL.includes(inc.status)){
+      $('#pzav').classList.remove('live'); $('#pzs').textContent = 'Finished';
+      if (inc.status === 'failed') append(`<div class="callout">${esc(inc.reason || 'failed')}</div>`);
+      if (inc.status === 'dismissed' && !inc.report) append(`<div class="callout">${esc(inc.reason || 'Declined. Nothing was changed.')}</div>`);
+      if (inc.status === 'undone') append(`<div class="callout">${esc(inc.reason)}</div>`);
+      if (inc.status === 'fixed' && !(LIVE && LIVE.kind === 'github')){  // GitHub fixes are undone on GitHub
+        $('#sideFoot').style.display = 'flex';
+        $('#sideFoot').insertAdjacentHTML('afterbegin', `<button class="btn line" id="iUndo">Undo fix</button>`);
+        $('#iUndo').onclick = async () => {
+          try { await api(`/api/incidents/${encodeURIComponent(id)}/undo`, {}); append(`<div class="callout">Undone. Every row and the quarantined knowledge are back exactly as they were before the fix.</div>`); $('#iUndo').remove(); refreshDesk(); }
+          catch(e){ append(`<div class="callout">${esc(e.message)}</div>`); }
+        };
+      }
+      return;
+    }
+    await sleep(1000);
   }
+}
+
+const youSaid = ok => append(`<div class="ev thought fade"><div class="dot" style="background:var(--olive)">You</div><div class="txt">${ok ? 'Approved.' : 'Declined.'}</div></div>`);
+
+async function renderStep(ev, lastTool, inc){
+  if (ev.type === 'status') $('#pzs').textContent = ev.text.replace(/\s*\(.*?\)/g, '');
+  if (ev.type === 'thought') append(`<div class="ev thought fade"><div class="dot">PZ</div><div class="txt">${esc(ev.text)}</div></div>`);
+  if (ev.type === 'tool_call') lastTool = append(`<div class="ev tool fade"><div class="h"><span>${esc(LIVE && LIVE.kind === 'import' && ev.name === 'replay_sessions' ? 'Sorting by evidence' : TOOL_LABEL[ev.name] || ev.name)}</span><span class="st"><span class="spin"></span></span></div><div class="b"></div></div>`);
+  if (ev.type === 'tool_result'){
+    if (lastTool){ lastTool.classList.add('done'); lastTool.querySelector('.st').innerHTML = '<span class="ok">✓ Done</span>'; lastTool.querySelector('.b').innerHTML = toolBody(ev); }
+    if (cy) await animateTool(ev);
+    if (ev.name === 'trace_back' && ev.data && ev.data.root && LIVE && LIVE.kind === 'github') await showPatientZero(ev.data.root);
+  }
+  if (ev.type === 'approval'){
+    setStage(4); approval(ev, inc.mode === 'autopilot');
+    if (inc.mode === 'recorded'){  // a recorded run pauses here for you, like the original demo, then plays the rest
+      $('#pzs').textContent = 'Waiting for you';
+      const ok = await new Promise(res => {
+        foot(`<button class="btn line" id="decline">Decline</button><button class="btn green cta" id="approve">Approve fix</button>`);
+        $('#approve').onclick = () => res(true); $('#decline').onclick = () => res(false);
+      });
+      foot(''); youSaid(ok);
+    }
+  }
+  if (ev.type === 'decision'){
+    if (ev.by === 'person') youSaid(ev.approved);
+    else append(`<div class="ev thought fade"><div class="dot" style="background:var(--green);color:#F0FFCE">AP</div><div class="txt">${esc(ev.text)}</div></div>`);
+  }
+  if (ev.type === 'report'){ setStage(5); showReport(ev.data); }
+  if (ev.type === 'error') append(`<div class="callout">${esc(ev.text)}</div>`);
+  await sleep(ev.type === 'thought' ? 700 : ev.type === 'tool_result' ? 250 : 350);
+  return lastTool;
 }
 
 function markBad(text, vals){ let h = esc(text); (vals || []).forEach(v => { h = h.split(esc(v)).join(`<mark class="bad">${esc(v)}</mark>`); }); return h; }
@@ -652,7 +756,7 @@ async function animateTool(ev){
   if (ev.name === 'apply_cleanup') d.quarantined.forEach(o => cy.$id(o).addClass('quar'));
 }
 
-function approval(ev){
+function approval(ev, autopilot){
   const s = typeof ev.summary === 'object' && ev.summary ? ev.summary : {};
   s.quarantine = s.quarantine || []; s.rows_to_fix = s.rows_to_fix || 0;
   s.irreversible_for_human_checklist = s.irreversible_for_human_checklist || 0;
@@ -660,7 +764,7 @@ function approval(ev){
   ev.rows = ev.rows || []; ev.checklist = ev.checklist || [];
   const rows = ev.rows.slice(0,5).map(r => r.deleted ? `<tr><td>${esc(r.row)}</td><td colspan="2">remove</td></tr>` : `<tr><td>${esc(r.row)}</td><td><span class="strike">${esc(r.was)}</span> → <span class="good">${esc(r.now)}</span></td><td>${esc(r.kept)}</td></tr>`).join('');
   append(`<div class="approval fade"><h3>Approve the fix?</h3>
-    <p style="font-size:13.5px">Nothing changes until you say so.</p>
+    <p style="font-size:13.5px">${autopilot ? "Nothing changes until it's signed off: autopilot checks it can apply this on its own, or leaves it to you." : 'Nothing changes until you say so.'}</p>
     ${ev.note ? `<div class="callout" style="border-color:var(--amber)">${esc(ev.note)}</div>` : ''}
     ${s.already_corrected_by_a_later_change ? `<p style="font-size:13px" class="muted">${s.already_corrected_by_a_later_change} records were already fixed later, so they're left alone.</p>` : ''}
     <div class="metrics"><div class="metric"><div class="v">${s.rows_to_fix}</div><div class="l">${s.github_actions ? 'changes to undo on GitHub' : 'records to fix'}</div></div><div class="metric"><div class="v">${s.quarantine.length}</div><div class="l">sources to block</div></div>
@@ -671,9 +775,6 @@ function approval(ev){
       return x.body ? `<div class="mail">Already sent: “${esc(x.body)}”<br><span class="good">Should have said: “${esc(c.should_have_been ? c.should_have_been.body : 'no message')}”</span></div>`
         : `<div class="mail">Needs a person: ${esc(Object.entries(x).filter(([k]) => !k.startsWith('_')).map(([k, v]) => `${k} ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' · ') || 'an action in another system')}<br><span class="good">Reverse it with the provider (Patient Zero isn't connected there).</span></div>`; }).join('')}
   </div>`);
-  foot(`<button class="btn line" id="decline">Decline</button><button class="btn green cta" id="approve">Approve fix</button>`);
-  const send = async ok => { foot(''); append(`<div class="ev thought fade"><div class="dot" style="background:var(--olive)">You</div><div class="txt">${ok ? 'Approved.' : 'Declined.'}</div></div>`); await api('/api/approve', {approved:ok}); };
-  $('#approve').onclick = () => send(true); $('#decline').onclick = () => send(false);
 }
 
 function showReport(r){
@@ -835,7 +936,17 @@ async function initEvals(){
     t.push(`<div><b>When the AI is unreliable (1 in 4 re-runs fails)</b>Checking once: right source ${f['1_replay'].right_source}, precision ${pct(f['1_replay'].precision)} · checking 3 times and taking the majority: ${f.majority_of_3.right_source}, precision ${pct(f.majority_of_3.precision)}</div>`); }
   $('#evTiles').innerHTML = t.join('') || '<div>No eval results yet. Run <code>python -m pz.evals</code>.</div>';
 }
-showPicker();
+refreshDesk();  // the autopilot switch shows the saved setting from the start
+// ?sim=inbox|github|memory|refund opens a simulated scenario (not on the home screen); ?incident=<id> opens one from a notification
+const QS = new URLSearchParams(location.search);
+(async () => {
+  if (QS.get('sim')) await start(QS.get('sim'));
+  else if (QS.get('incident')){
+    [OV, ALERTS, G] = await Promise.all([api('/api/overview'), api('/api/alerts'), api('/api/graph')]);
+    buildGraph(); cy.elements().removeClass('hidden'); cy.fit(undefined, 30);
+    showIncident(QS.get('incident'));
+  } else showPicker();
+})();
 </script>
 </body>
 </html>

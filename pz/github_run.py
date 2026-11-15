@@ -109,6 +109,7 @@ class GithubRun:
         self.events, self.done, self.error, self.cost = [], False, None, 0.0
         self.delta, self.mlflow_run_id = None, None
         self.investigation, self.verdict = None, None
+        self.on_session_end = None  # set by the server: called with each finished session id
         self.t0 = time.time()
 
     def emit(self, ev):
@@ -157,6 +158,13 @@ class GithubRun:
                 self._emit_session(sid, result.get("result", ""))
                 if self.delta:
                     self.delta.push_session(self.store, sid)
+                if self.on_session_end:  # the incident desk: detect + contain between sessions (no model calls)
+                    try:
+                        note = self.on_session_end(sid)
+                        if note:
+                            self.emit({"type": "phase", "text": note})
+                    except Exception as ex:
+                        self.emit({"type": "phase", "text": f"Incident desk skipped: {str(ex)[:120]}"})
             self._merge_all(len(issues))
             watch.stop.set()
             if self.delta:
@@ -257,6 +265,7 @@ class GithubCleanup:
 
     def __init__(self, store):
         self.s = store
+        self.via_pr = False  # autopilot: deliver reverts as a pull request instead of pushing to main
 
     def plan(self, verdict):
         merges = {e["row_key"]: json.loads(e["payload"]) for e in self.s.q("SELECT row_key, payload FROM events WHERE tool='merge'")}
@@ -286,6 +295,9 @@ class GithubCleanup:
         git = lambda *a: subprocess.run(["git", "-C", str(work), *a], capture_output=True, text=True)
         git("config", "user.email", "patient-zero@users.noreply.github.com")
         git("config", "user.name", "Patient Zero")
+        branch = f"patient-zero/revert-{uuid.uuid4().hex[:6]}"
+        if self.via_pr:
+            git("checkout", "-b", branch)
         for a in reversed(plan["actions"]):  # newest first, so later commits revert cleanly
             if a["do"] == "close pull request":
                 try:
@@ -302,12 +314,23 @@ class GithubCleanup:
             else:
                 git("commit", "--amend", "-m", f"Revert \"{a['title']}\"\n\nReverted by Patient Zero: this change was caused by a poisoned team note.")
                 done.append({**a, "result": "reverted", "revert_sha": git("rev-parse", "HEAD").stdout.strip()})
-        push = git("push", "origin", "main")
+        push = git("push", "origin", branch if self.via_pr else "main")
         if push.returncode != 0:
             for d in done:
                 if d["result"] == "reverted":
                     d["result"] = f"push failed: {push.stderr[:120]}"
-        return {"done": done, "quarantined": plan["quarantine"], "kept": plan["keep"]}
+        elif self.via_pr and any(d["result"] == "reverted" for d in done):
+            try:
+                url = gh("pr", "create", "--repo", REPO, "--head", branch, "--base", "main", "--title", "Patient Zero: revert changes caused by a poisoned team note",
+                         "--body", "Opened by Patient Zero autopilot. Each reverted commit was proven by replay to be caused by the poisoned note.").strip()
+                for d in done:
+                    if d["result"] == "reverted":
+                        d["revert_pr"] = url
+            except RuntimeError as ex:
+                for d in done:
+                    if d["result"] == "reverted":
+                        d["result"] = f"revert PR failed: {str(ex)[:120]}"
+        return {"done": done, "quarantined": plan["quarantine"], "kept": plan["keep"], "via_pr": self.via_pr}
 
 
 def load_run(run_id):

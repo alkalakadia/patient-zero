@@ -40,6 +40,7 @@ class LiveRun:
         self.agents_on = "claude" if os.environ.get("PZ_AGENTS") == "claude" or not self.use_databricks else "databricks"
         self.brain = (DatabricksBrain if self.agents_on == "databricks" else ClaudeBrain)(self.sc, on_event=self.emit)
         self.mlflow_run_id = None
+        self.on_session_end = None  # set by the server: called with each finished session id
         self.store = Store(DB_PATH.parent / f"live_{self.id}.db", fresh=True)
         self.store.db.execute("INSERT INTO meta VALUES ('scenario', ?), ('attack', ?)", (SCENARIO, json.dumps({"text": attack_text})))
         self.attacker_value = None
@@ -203,3 +204,10 @@ class LiveRun:
                 self.emit({"type": "session_end", "session": sid, "agent": agent, "actions": len(acts), "cost": self.brain.cost()})
                 if self.delta:
                     self.delta.push_session(self.store, sid)
+                if self.on_session_end:  # the incident desk: detect + contain between sessions (no model calls)
+                    try:
+                        note = self.on_session_end(sid)
+                        if note:
+                            self.emit({"type": "phase", "text": note})
+                    except Exception as ex:
+                        self.emit({"type": "phase", "text": f"Incident desk skipped: {str(ex)[:120]}"})

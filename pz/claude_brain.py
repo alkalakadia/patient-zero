@@ -81,10 +81,14 @@ class ClaudeBrain:
         return json.dumps(t)
 
     def _tool(self, sess, role, task, name, args):
+        sess.held = None
         try:
-            return self._tool_impl(sess, role, task, name, args)
+            out = self._tool_impl(sess, role, task, name, args)
         except (KeyError, TypeError, ValueError) as ex:  # a malformed tool call shouldn't crash the week
             return f"error: bad arguments ({ex})"
+        if sess.held:  # an open incident held the write: tell the agent instead of pretending it went through
+            return f"held by Patient Zero: {sess.held}. An incident is open; don't retry."
+        return out
 
     def _tool_impl(self, sess, role, task, name, args):
         sc, t = self.sc, task

@@ -3,7 +3,7 @@
 The agent orchestrates; the tools decide. Every finding comes from a deterministic tool
 (graph walk, counterfactual replay, change-feed revert), so the investigator cannot be
 talked into a wrong answer by the poisoned text it is investigating. Cleanup always
-waits for a human approval.
+waits for sign-off: a person's, or the autopilot policy a person set (pz/incidents.py).
 
 Two drivers produce the same event stream for the UI:
   ScriptedInvestigator  offline, no API key, reasoning written from tool results
@@ -179,7 +179,8 @@ def scripted(tb, alert_ids):
     yield from _call(tb, "plan_cleanup", {"root": root})
     pl = tb._last
     yield {"type": "thought", "text": f"Ready to fix {pl['rows_to_fix']} records. "
-                                      f"A full rollback would also erase {pl['legit_changes_a_point_in_time_restore_would_destroy']} good changes. I need your OK first."}
+                                      f"A full rollback would also erase {pl['legit_changes_a_point_in_time_restore_would_destroy']} good changes. "
+                                      "Nothing changes until it's signed off: by you, or by autopilot if it's on."}
     approved = yield {"type": "approval", "plan": tb.plan, "summary": pl}
     yield from _call(tb, "apply_cleanup", {"root": root, "approved": bool(approved)})
     if not approved:

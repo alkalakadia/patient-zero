@@ -8,6 +8,7 @@ The schema matches the Delta tables in CLAUDE.md so databricks_sync.py can mirro
 """
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "pz.db"
@@ -68,6 +69,27 @@ CREATE TABLE IF NOT EXISTS messages (
   msg_id TEXT PRIMARY KEY, to_addr TEXT, subject TEXT, body TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+-- incident desk: one row per incident (alerts grouped by the flagged value), see pz/incidents.py
+CREATE TABLE IF NOT EXISTS incidents (
+  incident_id TEXT PRIMARY KEY,
+  value TEXT,           -- the flagged value the detector saw (attacker's account, host...)
+  alert_ids TEXT,       -- json list of flagged event ids
+  root TEXT,            -- patient zero, once trace_back confirms it
+  status TEXT,          -- contained | investigating | awaiting_approval | fixing | fixed | dismissed | undone | failed | recorded
+  mode TEXT,            -- autopilot | manual | recorded
+  opened_at REAL, updated_at REAL,
+  reason TEXT,          -- why it waits for a person (autopilot policy), or what failed
+  suspects TEXT,        -- json list of kb objects withdrawn while the incident is open
+  steps TEXT,           -- json list of investigation events (same shape as the /api/investigate stream)
+  report TEXT,          -- json incident report
+  result TEXT           -- json cleanup result (kept for undo)
+);
+-- containment while an incident is open: writes carrying a value, or by sessions that read an object, are held
+CREATE TABLE IF NOT EXISTS holds (incident_id TEXT, kind TEXT, value TEXT, active INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS held_actions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id TEXT, session_id TEXT, agent_id TEXT, ts INTEGER,
+  tool TEXT, row_key TEXT, payload TEXT, reason TEXT
+);
 CREATE TABLE IF NOT EXISTS ground_truth (
   event_id TEXT PRIMARY KEY, poisoned INTEGER
 );
@@ -76,14 +98,43 @@ CREATE TABLE IF NOT EXISTS ground_truth (
 BUSINESS_TABLES = {"items": "item_id", "entities": "entity_id", "messages": "msg_id"}
 
 
+class _Serialized:
+    """One SQLite connection shared by request threads, the incident desk and live runs, used one call at a time.
+    Concurrent use of a single sqlite3 connection can hand back scrambled rows, and closing it under a running
+    query crashes Python."""
+
+    def __init__(self, con):
+        self._con, self.lock = con, threading.RLock()
+
+    def execute(self, *a):
+        with self.lock:
+            return self._con.execute(*a)
+
+    def executescript(self, sql):
+        with self.lock:
+            return self._con.executescript(sql)
+
+    def commit(self):
+        with self.lock:
+            self._con.commit()
+
+    def close(self):
+        with self.lock:
+            self._con.close()
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+
 class Store:
     def __init__(self, path=DB_PATH, fresh=False):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         if fresh and path.exists():
             path.unlink()
-        self.db = sqlite3.connect(path, check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
+        con = sqlite3.connect(path, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        self.db = _Serialized(con)
         self.db.executescript(SCHEMA)
 
     def close(self):
@@ -92,10 +143,12 @@ class Store:
 
     # ---------- generic ----------
     def q(self, sql, args=()):
-        return [dict(r) for r in self.db.execute(sql, args).fetchall()]
+        with self.db.lock:  # run and read the query as one step
+            return [dict(r) for r in self.db.execute(sql, args).fetchall()]
 
     def one(self, sql, args=()):
-        r = self.db.execute(sql, args).fetchone()
+        with self.db.lock:
+            r = self.db.execute(sql, args).fetchone()
         return dict(r) if r else None
 
     def commit(self):
@@ -108,6 +161,10 @@ class Store:
 
     def write_row(self, table, key, values, session_id, event_id, ts):
         """Insert or update a row and record a CDF-style change. Returns the change version."""
+        with self.db.lock:  # read-modify-write plus its change record, as one step
+            return self._write_row(table, key, values, session_id, event_id, ts)
+
+    def _write_row(self, table, key, values, session_id, event_id, ts):
         pk = BUSINESS_TABLES[table]
         before = self.get_row(table, key)
         if before is None:
