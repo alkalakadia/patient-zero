@@ -39,6 +39,10 @@ state = {}
 
 def load(scenario=DEFAULT, attack=None):
     keep = {k: state[k] for k in ("live", "dashboard_url") if k in state}
+    # Windows can't delete the SQLite file while it's open, so close the old store before rebuilding.
+    live, old = state.get("live"), state.get("store")
+    if old is not None and not (live and old is getattr(live, "store", None)):
+        old.close()
     state.clear()
     state.update(keep)
     sc = SCENARIOS[scenario]

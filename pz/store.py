@@ -86,6 +86,10 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
 
+    def close(self):
+        # Windows can't delete a SQLite file that still has an open handle, so close before a fresh rebuild.
+        self.db.close()
+
     # ---------- generic ----------
     def q(self, sql, args=()):
         return [dict(r) for r in self.db.execute(sql, args).fetchall()]
