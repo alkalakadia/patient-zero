@@ -581,6 +581,7 @@ async function showAlerts(){
     <p>Each uses a ${esc(OV.field)} nobody recognizes. Where did it come from?</p>
     ${deskNote()}
     <div class="alerts">${ALERTS.slice(0,8).map(a => `<div class="al ${a.event_id===selected?'sel':''}" data-id="${a.event_id}"><div><div class="r">${esc(a.text)}</div><div class="m">${esc(a.agent)} · day ${a.day}</div></div><div class="amt">${esc(a.amount)}</div></div>`).join('')}</div>`);
+  if (ALERTS.some(a => a.role === 'reviewer')) $('#sideBody').insertAdjacentHTML('beforeend', `<p class="muted" style="font-size:13px">We picked one for you. Click another to switch.</p>`);
   foot(INC.length ? dig : '');
   const spot = () => { cy.$('.spot').removeClass('spot'); const n = cy.$id(sidOf(selected)).addClass('spot'); cy.animate({center:{eles:n}, zoom:.9, duration:500}); };
   document.querySelectorAll('.al').forEach(el => el.onclick = () => { document.querySelectorAll('.al').forEach(x => x.classList.remove('sel')); el.classList.add('sel'); selected = el.dataset.id; spot(); });
@@ -593,33 +594,32 @@ async function showIncident(id){
   if (es) es.close();
   if (cy){ cy.elements().removeClass('hidden spot dim ruled exposed infected cleared root chain hot'); }
   setStage(3); hint(''); $('#explain').classList.remove('on');
-  head(`<div class="av pz live" id="pzav">PZ</div><div><div class="t">Patient Zero · ${esc(id)}</div><div class="s" id="pzs">Incident-response agent</div></div><span class="chip" id="mode">…</span>`);
+  head(`<div class="av pz live" id="pzav">PZ</div><div><div class="t">Patient Zero</div><div class="s" id="pzs">Starting</div></div><span class="chip" id="mode">…</span>`);
+  $('#mode').style.display = 'none';  // autopilot / human-in-the-loop state lives in the sidebar table and the header switch
   body(''); foot('');
   refreshDesk();
   let shown = 0, lastTool = null, waiting = false;
   while (my === incRun){
     let inc; try { inc = await api('/api/incidents/' + encodeURIComponent(id)); } catch(e){ body(`<div class="callout">${esc(e.message)}</div>`); return; }
-    $('#mode').textContent = inc.mode === 'recorded' ? 'recorded run' : inc.mode === 'autopilot' ? 'autopilot' : 'human in the loop';
-    $('#mode').classList.toggle('live', inc.mode !== 'manual');
-    $('#pzs').textContent = 'Incident-response agent · ' + (ST[inc.status] || ['', inc.status])[1];
     if (!shown && inc.reason && (inc.status === 'awaiting_investigation' || inc.status === 'contained'))
       append(`<div class="callout" style="border-color:var(--amber)">${esc(inc.reason)}</div>`);
     for (; shown < inc.steps.length; shown++){
       if (my !== incRun) return;
-      lastTool = await renderStep(inc.steps[shown], lastTool);
+      lastTool = await renderStep(inc.steps[shown], lastTool, inc);
     }
     const asks = inc.status === 'awaiting_approval' || inc.status === 'awaiting_investigation';
     if (asks && !waiting){
-      waiting = true; setStage(4);
-      if (inc.status === 'awaiting_approval') append(`<div class="callout" style="border-color:var(--red)"><b>Needs you:</b> ${esc(inc.reason || '')}</div>`);
-      foot(`<button class="btn line" id="iDismiss">Dismiss</button><button class="btn green" id="iApprove">${inc.status === 'awaiting_investigation' ? 'Investigate now' : 'Approve fix'}</button>`);
+      waiting = true; setStage(4); $('#pzs').textContent = 'Waiting for you';
+      // autopilot was on but its policy refused: say why (when autopilot is off, the approval card is the whole story)
+      if (inc.status === 'awaiting_approval' && inc.mode === 'autopilot') append(`<div class="callout" style="border-color:var(--red)"><b>Autopilot left this one to you:</b> ${esc(inc.reason || '')}</div>`);
+      foot(`<button class="btn line" id="iDismiss">Decline</button><button class="btn green cta" id="iApprove">${inc.status === 'awaiting_investigation' ? 'Investigate now' : 'Approve fix'}</button>`);
       const act = async a => { foot(''); try { await api(`/api/incidents/${encodeURIComponent(id)}/${a}`, {}); } catch(e){ append(`<div class="callout">${esc(e.message)}</div>`); } waiting = false; refreshDesk(); };
       $('#iApprove').onclick = () => act('approve'); $('#iDismiss').onclick = () => act('dismiss');
     }
     if (FINAL.includes(inc.status)){
-      $('#pzav').classList.remove('live');
+      $('#pzav').classList.remove('live'); $('#pzs').textContent = 'Finished';
       if (inc.status === 'failed') append(`<div class="callout">${esc(inc.reason || 'failed')}</div>`);
-      if (inc.status === 'dismissed' && !inc.report) append(`<div class="callout">${esc(inc.reason || 'Dismissed. Nothing was changed.')}</div>`);
+      if (inc.status === 'dismissed' && !inc.report) append(`<div class="callout">${esc(inc.reason || 'Declined. Nothing was changed.')}</div>`);
       if (inc.status === 'undone') append(`<div class="callout">${esc(inc.reason)}</div>`);
       if (inc.status === 'fixed' && !(LIVE && LIVE.kind === 'github')){  // GitHub fixes are undone on GitHub
         $('#sideFoot').style.display = 'flex';
@@ -635,7 +635,10 @@ async function showIncident(id){
   }
 }
 
-async function renderStep(ev, lastTool){
+const youSaid = ok => append(`<div class="ev thought fade"><div class="dot" style="background:var(--olive)">You</div><div class="txt">${ok ? 'Approved.' : 'Declined.'}</div></div>`);
+
+async function renderStep(ev, lastTool, inc){
+  if (ev.type === 'status') $('#pzs').textContent = ev.text.replace(/\s*\(.*?\)/g, '');
   if (ev.type === 'thought') append(`<div class="ev thought fade"><div class="dot">PZ</div><div class="txt">${esc(ev.text)}</div></div>`);
   if (ev.type === 'tool_call') lastTool = append(`<div class="ev tool fade"><div class="h"><span>${esc(LIVE && LIVE.kind === 'import' && ev.name === 'replay_sessions' ? 'Sorting by evidence' : TOOL_LABEL[ev.name] || ev.name)}</span><span class="st"><span class="spin"></span></span></div><div class="b"></div></div>`);
   if (ev.type === 'tool_result'){
@@ -643,8 +646,21 @@ async function renderStep(ev, lastTool){
     if (cy) await animateTool(ev);
     if (ev.name === 'trace_back' && ev.data && ev.data.root && LIVE && LIVE.kind === 'github') await showPatientZero(ev.data.root);
   }
-  if (ev.type === 'approval'){ setStage(4); approval(ev); }
-  if (ev.type === 'decision') append(`<div class="ev thought fade"><div class="dot" style="background:${ev.by === 'autopilot' ? 'var(--green)' : 'var(--olive)'};color:#F0FFCE">${ev.by === 'autopilot' ? 'AP' : 'You'}</div><div class="txt">${esc(ev.text)}</div></div>`);
+  if (ev.type === 'approval'){
+    setStage(4); approval(ev, inc.mode === 'autopilot');
+    if (inc.mode === 'recorded'){  // a recorded run pauses here for you, like the original demo, then plays the rest
+      $('#pzs').textContent = 'Waiting for you';
+      const ok = await new Promise(res => {
+        foot(`<button class="btn line" id="decline">Decline</button><button class="btn green cta" id="approve">Approve fix</button>`);
+        $('#approve').onclick = () => res(true); $('#decline').onclick = () => res(false);
+      });
+      foot(''); youSaid(ok);
+    }
+  }
+  if (ev.type === 'decision'){
+    if (ev.by === 'person') youSaid(ev.approved);
+    else append(`<div class="ev thought fade"><div class="dot" style="background:var(--green);color:#F0FFCE">AP</div><div class="txt">${esc(ev.text)}</div></div>`);
+  }
   if (ev.type === 'report'){ setStage(5); showReport(ev.data); }
   if (ev.type === 'error') append(`<div class="callout">${esc(ev.text)}</div>`);
   await sleep(ev.type === 'thought' ? 700 : ev.type === 'tool_result' ? 250 : 350);
@@ -740,7 +756,7 @@ async function animateTool(ev){
   if (ev.name === 'apply_cleanup') d.quarantined.forEach(o => cy.$id(o).addClass('quar'));
 }
 
-function approval(ev){
+function approval(ev, autopilot){
   const s = typeof ev.summary === 'object' && ev.summary ? ev.summary : {};
   s.quarantine = s.quarantine || []; s.rows_to_fix = s.rows_to_fix || 0;
   s.irreversible_for_human_checklist = s.irreversible_for_human_checklist || 0;
@@ -748,7 +764,7 @@ function approval(ev){
   ev.rows = ev.rows || []; ev.checklist = ev.checklist || [];
   const rows = ev.rows.slice(0,5).map(r => r.deleted ? `<tr><td>${esc(r.row)}</td><td colspan="2">remove</td></tr>` : `<tr><td>${esc(r.row)}</td><td><span class="strike">${esc(r.was)}</span> → <span class="good">${esc(r.now)}</span></td><td>${esc(r.kept)}</td></tr>`).join('');
   append(`<div class="approval fade"><h3>Approve the fix?</h3>
-    <p style="font-size:13.5px">Nothing changes until it's signed off: by you, or by autopilot if it's on.</p>
+    <p style="font-size:13.5px">${autopilot ? "Nothing changes until it's signed off: autopilot checks it can apply this on its own, or leaves it to you." : 'Nothing changes until you say so.'}</p>
     ${ev.note ? `<div class="callout" style="border-color:var(--amber)">${esc(ev.note)}</div>` : ''}
     ${s.already_corrected_by_a_later_change ? `<p style="font-size:13px" class="muted">${s.already_corrected_by_a_later_change} records were already fixed later, so they're left alone.</p>` : ''}
     <div class="metrics"><div class="metric"><div class="v">${s.rows_to_fix}</div><div class="l">${s.github_actions ? 'changes to undo on GitHub' : 'records to fix'}</div></div><div class="metric"><div class="v">${s.quarantine.length}</div><div class="l">sources to block</div></div>
