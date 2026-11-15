@@ -103,6 +103,13 @@ class Delta:
         rows = store.q("SELECT * FROM kb WHERE created_by_session=?", (created_by,)) if created_by else store.q("SELECT * FROM kb")
         self.q.put(("kb", rows, None, None))
 
+    def set_status(self, object_ids, status):
+        """Mirror a containment change (suspect / quarantined / active) to the Delta knowledge table."""
+        self.flush()
+        names = {f"o{i}": o for i, o in enumerate(object_ids)}
+        self.sql(f"UPDATE {SCHEMA}.knowledge SET status=:s WHERE run_id=:r AND object_id IN ({','.join(':' + n for n in names)})",
+                 {"s": status, "r": self.run_id, **names})
+
     def record_incident(self, kind, root, proven, cleared, fixed, detail):
         """One row per incident, whatever system the damage was in (payments, GitHub, ...)."""
         self.flush()

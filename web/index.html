@@ -168,6 +168,25 @@ input[type=text],select{width:100%;background:var(--panel2);border:1px solid var
 input[type=range]{width:100%;accent-color:var(--red)}
 .toggle{display:flex;gap:10px;align-items:center;font-size:14px}
 .err{color:#ff8a96;font-size:13px;margin-top:8px;min-height:18px}
+/* incident desk: the table at the top of the sidebar + the autopilot switch in the header */
+#incDesk{border-bottom:1px solid var(--line);padding:10px 14px 6px;max-height:32vh;overflow:auto;background:#0d1016;flex:none}
+#incDesk .ih{display:flex;align-items:center;gap:8px;font:600 11px var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+#incDesk .ih b{color:var(--text)}
+#incDesk table{margin:0;font-size:11.5px}
+#incDesk td,#incDesk th{padding:5px 4px}
+#incDesk tr.inc{cursor:pointer}
+#incDesk tr.inc:hover td{background:var(--panel2)}
+#incDesk tr.sel td{background:#1d2130}
+#incDesk .empty{font-size:12.5px;color:var(--muted);padding:4px 0 6px}
+.ipill{font:700 10.5px var(--mono);padding:2px 7px;border-radius:999px;white-space:nowrap;background:#1d2130;color:var(--muted)}
+.ipill.red{background:var(--red-bg);color:#ffb3bb} .ipill.amber{background:var(--amber-bg);color:#ffd08a} .ipill.green{background:var(--green-bg);color:#8ff0c4}
+.apt{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;white-space:nowrap;user-select:none}
+.apt input{display:none}
+.apt .sw{width:34px;height:20px;border-radius:999px;background:#2a3042;position:relative;transition:.2s;flex:none}
+.apt .sw:after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:#8b92a6;transition:.2s}
+.apt input:checked + .sw{background:var(--green)}
+.apt input:checked + .sw:after{left:17px;background:#06291b}
+.apt input:checked ~ span{color:var(--text)}
 @media (max-width:1000px){main{grid-template-columns:1fr;grid-template-rows:45vh 1fr}#side{border-left:0;border-top:1px solid var(--line)}.stages{display:none}}
 </style>
 </head>
@@ -175,6 +194,7 @@ input[type=range]{width:100%;accent-color:var(--red)}
 <header>
   <div class="logo"><span class="pulse"></span>Patient Zero <small>incident response for AI agents</small></div>
   <div class="stages" id="stages"></div>
+  <label class="apt" title="On: fixes proven by replay are applied automatically; anything else waits for you. Off: every fix waits for your approval."><input type="checkbox" id="apToggle" checked><span class="sw"></span><span id="apLabel">Autopilot</span></label>
   <button class="hbtn" id="toPicker">Home</button>
 </header>
 <main>
@@ -186,6 +206,7 @@ input[type=range]{width:100%;accent-color:var(--red)}
     <div id="explain"></div>
   </section>
   <aside id="side">
+    <div id="incDesk"></div>
     <div id="sideHead"></div>
     <div id="sideBody"></div>
     <div id="sideFoot"></div>
@@ -267,6 +288,7 @@ function append(html){ const b = $('#sideBody'); b.insertAdjacentHTML('beforeend
 /* ---------------- scenario picker ---------------- */
 async function showPicker(){
   if (es) es.close();
+  incRun++; openInc = null;
   const my = ++runId;
   setStage(0);
   if (!SC.length) SC = await api('/api/scenarios');
@@ -304,7 +326,8 @@ function buildGraph(){
     else { x = xOf(n.ts); y = laneY(0) + (n.kind === 'memory' ? 28 : -32); }
     const poison = n.source && /edit|ticket|email|issue|compromised|chat/i.test(n.source);
     els.push({data:{id:n.id, label:n.kind === 'session' ? '' : n.id, color:ROLE_COLOR[n.role] || '#9b7bf0'}, position:{x, y},
-      classes:[n.kind, poison ? 'poison' : '', (n.kind === 'session' || n.ts > 0) ? 'hidden' : ''].join(' ')});
+      classes:[n.kind, poison ? 'poison' : '', (n.kind === 'session' || n.ts > 0) ? 'hidden' : '',
+               n.status === 'quarantined' ? 'quar' : n.status === 'suspect' ? 'withdrawn' : ''].join(' ')});
   });
   [['Knowledge & memory',0],[ag.primary[1],1],[ag.reviewer[1],2],[ag.notifier[1],3],['Nightly job',4]].forEach(([t,i]) =>
     els.push({data:{id:'lane'+i, label:t}, position:{x:-110, y:laneY(i)}, classes:'lane'}));
@@ -333,6 +356,7 @@ function buildGraph(){
       {selector:'node.root', style:{'background-color':'#ff4d5e','border-width':5,'border-color':'#ffb3bb','width':70,'height':38,'font-size':15,'z-index':20}},
       {selector:'node.memory.root', style:{'width':44,'height':44}},
       {selector:'node.ruled', style:{'border-width':3,'border-color':'#3ecf8e','opacity':1}},
+      {selector:'node.withdrawn', style:{'border-width':3,'border-style':'dashed','border-color':'#ffb347'}},
       {selector:'node.quar', style:{'background-opacity':.15,'border-width':3,'border-style':'dashed','border-color':'#ff4d5e','color':'#ff8a96'}},
       {selector:'edge.hot', style:{'line-color':'#ff4d5e','width':1.6,'opacity':.75}},
       {selector:'edge.chain', style:{'line-color':'#ffffff','width':4,'opacity':1,'z-index':10}},
@@ -406,52 +430,102 @@ async function playWeek(run){
   showAlerts();
 }
 
-/* ---------------- alerts ---------------- */
-function showAlerts(){
+/* ---------------- incident desk: alerts become incidents, contained and investigated without a prompt ---------------- */
+const TOOL_LABEL = {trace_back:'walk back to the source', trace_forward:'trace the spread', find_lookalikes:'search for reworded copies', replay_sessions:'replay without the poison', plan_cleanup:'plan the cleanup', apply_cleanup:'apply the cleanup', request_approval:'ask for sign-off'};
+const ST = {contained:['amber','contained'], investigating:['amber','investigating'], awaiting_investigation:['amber','ready to investigate'],
+            awaiting_approval:['red','needs you'], fixing:['amber','fixing'], fixed:['green','fixed'], dismissed:['','dismissed'],
+            undone:['','undone'], failed:['red','failed'], recorded:['green','recorded']};
+const FINAL = ['fixed','dismissed','undone','failed','recorded'];
+let INC = [], AUTOPILOT = true, openInc = null, incRun = 0;
+const ipill = st => { const [c, t] = ST[st] || ['', st]; return `<span class="ipill ${c}">${t}</span>`; };
+
+async function refreshDesk(){
+  let d; try { d = await api('/api/incidents'); } catch(e){ return; }
+  INC = d.incidents; AUTOPILOT = d.settings.autopilot;
+  $('#apToggle').checked = AUTOPILOT; $('#apLabel').textContent = AUTOPILOT ? 'Autopilot on' : 'Autopilot off';
+  const need = INC.filter(i => i.status === 'awaiting_approval' || i.status === 'awaiting_investigation').length;
+  $('#incDesk').innerHTML = `<div class="ih">Incidents <b>${INC.length}</b>${need ? `<span class="ipill red">${need} need you</span>` : ''}</div>`
+    + (INC.length ? `<table><thead><tr><th>Status</th><th>Source</th><th>Flagged value</th><th title="actions proven caused by it">Proven</th><th title="changes undone">Fixed</th><th title="actions held while it was open">Held</th></tr></thead><tbody>`
+      + INC.map(i => `<tr class="inc ${openInc === i.incident_id ? 'sel' : ''}" data-inc="${esc(i.incident_id)}"><td>${ipill(i.status)}</td><td>${esc(i.root || '…')}</td><td>${esc(i.value)}</td>
+          <td>${i.report ? i.report.proven : '·'}</td><td>${i.report ? i.report.fixed : '·'}</td><td>${i.held}</td></tr>`).join('') + '</tbody></table>'
+      : `<div class="empty">No incidents. Detection rules watch every recorded action.</div>`);
+  document.querySelectorAll('#incDesk tr.inc').forEach(r => r.onclick = () => showIncident(r.dataset.inc));
+}
+$('#apToggle').onchange = async e => { await api('/api/settings', {autopilot: e.target.checked}); refreshDesk(); };
+setInterval(() => { if (!$('#picker').classList.contains('on')) refreshDesk(); }, 2000);
+
+async function showAlerts(){
   setStage(2);
-  head(`<div class="av" style="background:var(--amber)">!</div><div><div class="t">Detection rule</div><div class="s">Flags any ${esc(OV.field)} that no known ${esc(OV.entity)} owns</div></div>`);
-  const reviewerPick = ALERTS.some(a => a.role === 'reviewer');
-  body(`<div class="kicker">Day 8</div><h1>${ALERTS.length} actions flagged</h1>
-    <p>Each one uses a ${esc(OV.field)} nobody recognizes. You can't tell yet where they came from, how many agents are involved, or whether it's still happening.</p>
-    <div class="alerts">${ALERTS.slice(0,8).map(a => `<div class="al ${a.event_id===selected?'sel':''}" data-id="${a.event_id}"><div><div class="r">${esc(a.text)}</div><div class="m">${esc(a.agent)} · day ${a.day}</div></div><div class="amt">${esc(a.amount)}</div></div>`).join('')}</div>
-    ${reviewerPick ? `<p class="muted" style="font-size:13px">We've picked a ${esc(OV.agents.reviewer[1])} alert: that agent never read the poison directly. Click another to change it.</p>` : ''}`);
-  foot(`<button class="btn red" id="hand">Hand this alert to Patient Zero →</button>`);
-  const spot = () => { cy.$('.spot').removeClass('spot'); const n = cy.$id(sidOf(selected)).addClass('spot'); cy.animate({center:{eles:n}, zoom:.9, duration:500}); };
-  document.querySelectorAll('.al').forEach(el => el.onclick = () => { document.querySelectorAll('.al').forEach(x => x.classList.remove('sel')); el.classList.add('sel'); selected = el.dataset.id; spot(); });
-  spot();
-  $('#hand').onclick = investigate;
+  await refreshDesk();
+  head(`<div class="av" style="background:var(--amber)">!</div><div><div class="t">Incident desk</div><div class="s">Detection rules run on every recorded action</div></div>`);
+  body(`<div class="kicker">Alerts</div><h1>${ALERTS.length} actions flagged · ${INC.length} incident${INC.length === 1 ? '' : 's'}</h1>
+    <p>Nobody had to hand anything over. Patient Zero grouped the alerts into incidents by the value they share (table above), <b>contained each one right away</b>: actions carrying that value are held and knowledge containing it is withdrawn from every agent. Then it investigated in the background.</p>
+    <p>${AUTOPILOT ? '<b>Autopilot is on:</b> a fix proven by replay with no conflicting changes is applied automatically. Anything else waits for you.' : '<b>Autopilot is off:</b> every fix waits for your approval.'} Flip the switch at the top to change it.</p>
+    <p class="muted" style="font-size:13px">Click an incident to watch how it was investigated and fixed.</p>`);
+  foot(INC.length ? `<button class="btn red" id="openInc">Open the incident →</button>` : '');
+  if (INC.length) $('#openInc').onclick = () => showIncident((INC.find(i => i.status === 'awaiting_approval') || INC[0]).incident_id);
 }
 
-/* ---------------- the Patient Zero agent ---------------- */
-const TOOL_LABEL = {trace_back:'walk back to the source', trace_forward:'trace the spread', replay_sessions:'replay without the poison', plan_cleanup:'plan the cleanup', apply_cleanup:'apply the cleanup', request_approval:'ask a human'};
-
-function investigate(){
-  setStage(3); hint(''); cy.$('.spot').removeClass('spot');
-  head(`<div class="av pz live" id="pzav">PZ</div><div><div class="t">Patient Zero</div><div class="s" id="pzs">Incident-response agent · starting</div></div><span class="chip" id="mode">…</span>`);
+async function showIncident(id){
+  const my = ++incRun; openInc = id;
+  if (es) es.close();
+  if (cy){ cy.elements().removeClass('hidden spot dim ruled exposed infected cleared root chain hot'); }
+  setStage(3); hint(''); $('#explain').classList.remove('on');
+  head(`<div class="av pz live" id="pzav">PZ</div><div><div class="t">Patient Zero · ${esc(id)}</div><div class="s" id="pzs">Incident-response agent</div></div><span class="chip" id="mode">…</span>`);
   body(''); foot('');
-  let lastTool = null;
-  const queue = []; let draining = false;
-  const drain = async () => { if (draining) return; draining = true; while (queue.length) await handle(queue.shift()); draining = false; };
-  const url = LIVE && LIVE.replay && LIVE.links && LIVE.links.investigated ? '/api/investigate/replay'
-            : LIVE && LIVE.kind === 'import' ? '/api/investigate?event_ids=' + encodeURIComponent(ALERTS.map(a => a.event_id).join(','))
-            : '/api/investigate?event_ids=' + encodeURIComponent(LIVE && LIVE.kind === 'github' ? ALERTS.map(a => a.event_id).join(',') : selected) + (LIVE ? '&mode=claude' : '');
-  es = new EventSource(url);
-  es.onmessage = m => { queue.push(JSON.parse(m.data)); drain(); };
-  es.onerror = () => es.close();
-  async function handle(ev){
-    if (ev.type === 'mode'){ $('#mode').textContent = LIVE && LIVE.kind === 'import' ? 'evidence mode · from traces' : ev.replay ? 'Claude · recorded run' : ev.claude ? 'Claude · live' : 'offline · scripted reasoning'; $('#mode').classList.toggle('live', ev.claude); }
-    if (ev.type === 'status') $('#pzs').textContent = 'Incident-response agent · ' + ev.text.toLowerCase();
-    if (ev.type === 'thought') append(`<div class="ev thought fade"><div class="dot">PZ</div><div class="txt">${esc(ev.text)}</div></div>`);
-    if (ev.type === 'tool_call') lastTool = append(`<div class="ev tool fade"><div class="h"><span>${esc(ev.name)}</span><span class="muted" style="font-family:Inter;font-weight:500">${esc(LIVE && LIVE.kind === 'import' && ev.name === 'replay_sessions' ? 'classify by evidence' : TOOL_LABEL[ev.name] || '')}</span><span class="st"><span class="spin"></span></span></div><div class="b"></div></div>`);
-    if (ev.type === 'tool_result'){
-      if (lastTool){ lastTool.classList.add('done'); lastTool.querySelector('.st').innerHTML = '<span class="ok">✓ done</span>'; lastTool.querySelector('.b').innerHTML = toolBody(ev); }
-      await animateTool(ev);
+  refreshDesk();
+  let shown = 0, lastTool = null, waiting = false;
+  while (my === incRun){
+    let inc; try { inc = await api('/api/incidents/' + encodeURIComponent(id)); } catch(e){ body(`<div class="callout">${esc(e.message)}</div>`); return; }
+    $('#mode').textContent = inc.mode === 'recorded' ? 'recorded run' : inc.mode === 'autopilot' ? 'autopilot' : 'human in the loop';
+    $('#mode').classList.toggle('live', inc.mode !== 'manual');
+    $('#pzs').textContent = 'Incident-response agent · ' + (ST[inc.status] || ['', inc.status])[1];
+    if (!shown && inc.reason && (inc.status === 'awaiting_investigation' || inc.status === 'contained'))
+      append(`<div class="callout" style="border-color:var(--amber)">${esc(inc.reason)}</div>`);
+    for (; shown < inc.steps.length; shown++){
+      if (my !== incRun) return;
+      lastTool = await renderStep(inc.steps[shown], lastTool);
     }
-    if (ev.type === 'approval'){ setStage(4); approval(ev); }
-    if (ev.type === 'report'){ setStage(5); showReport(ev.data); }
-    if (ev.type === 'error') append(`<div class="callout">${esc(ev.text)}</div>`);
-    if (ev.type === 'done'){ es.close(); $('#pzav').classList.remove('live'); $('#pzs').textContent = 'Incident-response agent · finished'; }
+    const asks = inc.status === 'awaiting_approval' || inc.status === 'awaiting_investigation';
+    if (asks && !waiting){
+      waiting = true; setStage(4);
+      if (inc.status === 'awaiting_approval') append(`<div class="callout" style="border-color:var(--red)"><b>Needs you:</b> ${esc(inc.reason || '')}</div>`);
+      foot(`<button class="btn line" id="iDismiss">Dismiss</button><button class="btn green" id="iApprove">${inc.status === 'awaiting_investigation' ? 'Investigate now' : 'Approve fix'}</button>`);
+      const act = async a => { foot(''); try { await api(`/api/incidents/${encodeURIComponent(id)}/${a}`, {}); } catch(e){ append(`<div class="callout">${esc(e.message)}</div>`); } waiting = false; refreshDesk(); };
+      $('#iApprove').onclick = () => act('approve'); $('#iDismiss').onclick = () => act('dismiss');
+    }
+    if (FINAL.includes(inc.status)){
+      $('#pzav').classList.remove('live');
+      if (inc.status === 'failed') append(`<div class="callout">${esc(inc.reason || 'failed')}</div>`);
+      if (inc.status === 'dismissed' && !inc.report) append(`<div class="callout">${esc(inc.reason || 'Dismissed. Nothing was changed.')}</div>`);
+      if (inc.status === 'undone') append(`<div class="callout">${esc(inc.reason)}</div>`);
+      if (inc.status === 'fixed' && !(LIVE && LIVE.kind === 'github')){  // GitHub fixes are undone on GitHub
+        $('#sideFoot').style.display = 'flex';
+        $('#sideFoot').insertAdjacentHTML('afterbegin', `<button class="btn line" id="iUndo">Undo fix</button>`);
+        $('#iUndo').onclick = async () => {
+          try { await api(`/api/incidents/${encodeURIComponent(id)}/undo`, {}); append(`<div class="callout">Undone. Every row and the quarantined knowledge are back exactly as they were before the fix.</div>`); $('#iUndo').remove(); refreshDesk(); }
+          catch(e){ append(`<div class="callout">${esc(e.message)}</div>`); }
+        };
+      }
+      return;
+    }
+    await sleep(1000);
   }
+}
+
+async function renderStep(ev, lastTool){
+  if (ev.type === 'thought') append(`<div class="ev thought fade"><div class="dot">PZ</div><div class="txt">${esc(ev.text)}</div></div>`);
+  if (ev.type === 'tool_call') lastTool = append(`<div class="ev tool fade"><div class="h"><span>${esc(ev.name)}</span><span class="muted" style="font-family:Inter;font-weight:500">${esc(LIVE && LIVE.kind === 'import' && ev.name === 'replay_sessions' ? 'classify by evidence' : TOOL_LABEL[ev.name] || '')}</span><span class="st"><span class="spin"></span></span></div><div class="b"></div></div>`);
+  if (ev.type === 'tool_result'){
+    if (lastTool){ lastTool.classList.add('done'); lastTool.querySelector('.st').innerHTML = '<span class="ok">✓ done</span>'; lastTool.querySelector('.b').innerHTML = toolBody(ev); }
+    if (cy) await animateTool(ev);
+  }
+  if (ev.type === 'approval'){ setStage(4); approval(ev); }
+  if (ev.type === 'decision') append(`<div class="ev thought fade"><div class="dot" style="background:${ev.by === 'autopilot' ? 'var(--green)' : '#2a3042'};color:${ev.by === 'autopilot' ? '#06291b' : '#fff'}">${ev.by === 'autopilot' ? 'AP' : 'You'}</div><div class="txt">${esc(ev.text)}</div></div>`);
+  if (ev.type === 'report'){ setStage(5); showReport(ev.data); }
+  if (ev.type === 'error') append(`<div class="callout">${esc(ev.text)}</div>`);
+  await sleep(ev.type === 'thought' ? 700 : ev.type === 'tool_result' ? 250 : 350);
+  return lastTool;
 }
 
 function kv(k, v){ return `<div class="kv"><span>${esc(k)}</span><b>${esc(v)}</b></div>`; }
@@ -521,7 +595,7 @@ function approval(ev){
   ev.rows = ev.rows || []; ev.checklist = ev.checklist || [];
   const rows = ev.rows.slice(0,5).map(r => r.deleted ? `<tr><td>${esc(r.row)}</td><td colspan="2">remove</td></tr>` : `<tr><td>${esc(r.row)}</td><td><span class="strike">${esc(r.was)}</span> → <span class="good">${esc(r.now)}</span></td><td>${esc(r.kept)}</td></tr>`).join('');
   append(`<div class="approval fade"><h3>Approve the cleanup?</h3>
-    <p style="font-size:13.5px">Patient Zero won't change anything without a person signing off.</p>
+    <p style="font-size:13.5px">Nothing changes until it's signed off: by the autopilot policy, or by a person.</p>
     ${ev.note ? `<div class="callout" style="border-color:var(--amber)">${esc(ev.note)}</div>` : ''}
     ${s.already_corrected_by_a_later_change ? `<p style="font-size:13px" class="muted">${s.already_corrected_by_a_later_change} rows were already corrected by a later change (the Treasury agent), so they are left as they are.</p>` : ''}
     <div class="metrics"><div class="metric"><div class="v">${s.rows_to_fix}</div><div class="l">${s.github_actions ? 'changes to undo on GitHub' : 'rows to fix, field by field'}</div></div><div class="metric"><div class="v">${s.quarantine.length}</div><div class="l">to quarantine</div></div>
@@ -530,9 +604,6 @@ function approval(ev){
       : `<table><thead><tr><th>Row</th><th>${esc(OV.field)}</th><th>Kept</th></tr></thead><tbody>${rows}</tbody></table>`}
     ${ev.checklist.slice(0,1).map(c => `<div class="mail">Already sent, can't unsend: “${esc(c.sent.body)}”<br><span class="good">Correct version: “${esc(c.should_have_been ? c.should_have_been.body : 'no message')}”</span></div>`).join('')}
   </div>`);
-  foot(`<button class="btn line" id="decline">Decline</button><button class="btn green" id="approve">Approve cleanup</button>`);
-  const send = async ok => { foot(''); append(`<div class="ev thought fade"><div class="dot" style="background:#2a3042">You</div><div class="txt">${ok ? 'Approved.' : 'Declined.'}</div></div>`); await api('/api/approve', {approved:ok}); };
-  $('#approve').onclick = () => send(true); $('#decline').onclick = () => send(false);
 }
 
 function showReport(r){
@@ -671,7 +742,17 @@ $('#mlfGo').onclick = async () => {
 
 initLive();
 initGithub();
-showPicker();
+refreshDesk();  // the autopilot switch shows the saved setting from the start
+// ?sim=inbox|github|memory|refund opens a simulated scenario (not on the home screen); ?incident=<id> opens one from a notification
+const QS = new URLSearchParams(location.search);
+(async () => {
+  if (QS.get('sim')) await start(QS.get('sim'));
+  else if (QS.get('incident')){
+    [OV, ALERTS, G] = await Promise.all([api('/api/overview'), api('/api/alerts'), api('/api/graph')]);
+    buildGraph(); cy.elements().removeClass('hidden'); cy.fit(undefined, 30);
+    showIncident(QS.get('incident'));
+  } else showPicker();
+})();
 </script>
 </body>
 </html>

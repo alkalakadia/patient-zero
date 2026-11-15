@@ -68,6 +68,27 @@ CREATE TABLE IF NOT EXISTS messages (
   msg_id TEXT PRIMARY KEY, to_addr TEXT, subject TEXT, body TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+-- incident desk: one row per incident (alerts grouped by the flagged value), see pz/incidents.py
+CREATE TABLE IF NOT EXISTS incidents (
+  incident_id TEXT PRIMARY KEY,
+  value TEXT,           -- the flagged value the detector saw (attacker's account, host...)
+  alert_ids TEXT,       -- json list of flagged event ids
+  root TEXT,            -- patient zero, once trace_back confirms it
+  status TEXT,          -- contained | investigating | awaiting_approval | fixing | fixed | dismissed | undone | failed | recorded
+  mode TEXT,            -- autopilot | manual | recorded
+  opened_at REAL, updated_at REAL,
+  reason TEXT,          -- why it waits for a person (autopilot policy), or what failed
+  suspects TEXT,        -- json list of kb objects withdrawn while the incident is open
+  steps TEXT,           -- json list of investigation events (same shape as the /api/investigate stream)
+  report TEXT,          -- json incident report
+  result TEXT           -- json cleanup result (kept for undo)
+);
+-- containment while an incident is open: writes carrying a value, or by sessions that read an object, are held
+CREATE TABLE IF NOT EXISTS holds (incident_id TEXT, kind TEXT, value TEXT, active INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS held_actions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id TEXT, session_id TEXT, agent_id TEXT, ts INTEGER,
+  tool TEXT, row_key TEXT, payload TEXT, reason TEXT
+);
 CREATE TABLE IF NOT EXISTS ground_truth (
   event_id TEXT PRIMARY KEY, poisoned INTEGER
 );
