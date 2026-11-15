@@ -23,6 +23,9 @@ state = {}
 
 def load(scenario=DEFAULT, attack=None):
     live = state.get("live")
+    old = state.get("store")
+    if old is not None and not (live and old is live.store):
+        old.close()
     state.clear()
     if live:
         state["live"] = live
