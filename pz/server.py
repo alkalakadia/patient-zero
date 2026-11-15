@@ -429,7 +429,7 @@ def import_mlflow(req: ImportReq):
 
 # ---------------- real coding agent on GitHub ----------------
 
-GH_RECORDED = {"claude-code": "c4ecfc9a", "databricks": "54afee64"}
+GH_RECORDED = {"claude-code": "c4ecfc9a", "databricks": "e616319e"}
 
 
 def _latest_github_run():

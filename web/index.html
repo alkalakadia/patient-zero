@@ -450,7 +450,8 @@ async function onTap(node){
   if (!verdict){
     $('#explain').innerHTML = `<button class="x" aria-label="Close" onclick="this.parentElement.classList.remove('on')">×</button>
       <div style="padding-right:20px"><b>${esc(n.agent_name)} · day ${n.day}</b> <span class="muted" style="font-size:12.5px">${n.actions.length} action${n.actions.length === 1 ? '' : 's'}</span></div>
-      <div class="feed" style="margin-top:10px;max-height:220px;overflow:auto">${n.actions.map(a => `<div style="border-left-color:${ROLE_COLOR[n.role] || '#BCAA99'}">${esc(a.text)}</div>`).join('')}</div>`;
+      <div class="feed" style="margin-top:10px;max-height:220px;overflow:auto">${n.actions.map(a => `<div style="border-left-color:${ROLE_COLOR[n.role] || '#BCAA99'}">${esc(a.text)}</div>`).join('')}</div>
+      <div class="muted" style="font-size:12px;margin-top:8px">The side-by-side comparison (with and without the attack) appears once Patient Zero finishes testing each action.</div>`;
     $('#explain').classList.add('on'); return;
   }
   const conf = new Set(verdict.confirmed);
