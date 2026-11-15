@@ -932,7 +932,7 @@ async function initEvals(){
   if (e.suite){ const s = e.suite, f = s.flaky_replays_25pct;
     t.push(num(s.right_source, 'simulated incidents traced to the right source'));
     t.push(num(f.majority_of_3.right_source, 'right source even when 1 in 4 replays failed'));
-    t.push(num(s.false_alarms_on_clean_weeks + (e.live ? e.live.false_alarms_when_not_fooled : 0), `false alarms in ${s.clean_weeks} weeks without an attack`)); }
+    t.push(num(s.false_alarms_on_clean_weeks + (e.live ? e.live.false_alarms_when_not_fooled : 0), `false alarms in ${s.clean_weeks} test runs with no attack`)); }
   const more = [];
   if (e.suite) more.push(`The monitor alerted at the first harmful action in ${e.suite.monitor.alert_on_the_first_harmful_action} and warned before any harm in ${e.suite.monitor.early_warning_before_any_harm}.`);
   if (e.models) more.push(`Our hardest test, real AI agents with reworded attacks: right source in ${e.models.right_source_when_fooled}.`);
