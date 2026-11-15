@@ -12,10 +12,11 @@ ACTION_TYPES = ("tool_call", "memory_write")
 
 
 class Engine:
-    def __init__(self, store, brain=None):
+    def __init__(self, store, brain=None, evidence=None):
         import re
         from .sim import scenario_of
         self.s, self.brain = store, brain
+        self.evidence = evidence  # trace-only mode: cause is shown by this value appearing in source and action
         self.value_re = re.compile(scenario_of(store)["value_re"])
         self._build_graph()
 
@@ -86,6 +87,13 @@ class Engine:
         for obj, evs in explains.items():
             # counterfactual root test: hide the object, cascade down the chain (a memory on the path is
             # hidden only if its writer would not have written it without the object), then replay the bad session
+            if self.evidence is not None:
+                from .mlflow_import import _norm
+                candidates.append({
+                    "object_id": obj, "kind": self.kb[obj]["kind"], "source": self.kb[obj]["source"], "text": self.kb[obj]["text"],
+                    "explains": len(evs), "of": len(event_ids), "exposed_sessions": len(self._exposed_sessions(obj)),
+                    "confirmed": self.evidence in _norm(self.kb[obj]["text"]), "path": paths[(obj, sorted(evs)[0])], "by": "evidence"})
+                continue
             probe = sorted(evs)[0]
             hidden = {obj}
             for mem in reversed([n for n in paths[(obj, probe)] if self.kb.get(n, {}).get("kind") == "memory"]):
@@ -100,7 +108,9 @@ class Engine:
                 "confirmed": changed, "path": paths[(obj, probe)],
             })
         # patient zero is the most upstream object whose removal changes the outcome
-        candidates.sort(key=lambda c: (not c["confirmed"], self.kb[c["object_id"]]["created_ts"], -c["explains"]))
+        # patient zero: confirmed, explains the most flagged actions (an agent's own task input explains only its own),
+        # then the most upstream
+        candidates.sort(key=lambda c: (not c["confirmed"], -c["explains"], self.kb[c["object_id"]]["created_ts"]))
         return candidates
 
     def _derived_memories(self, root):
@@ -126,6 +136,9 @@ class Engine:
 
     def _norm(self, tool, key, vals):
         """Compare actions by what matters, not wording: free text is reduced to the sensitive values it mentions."""
+        if tool == "open_pull_request":
+            text = json.dumps(vals.get("files", {})) + (vals.get("body") or "")
+            return (tool, frozenset(self.value_re.findall(text)))
         if tool in ("save_memory", "send_message"):
             text = vals.get("text") or vals.get("body") or ""
             return (tool, frozenset(self.value_re.findall(text)))
@@ -168,6 +181,10 @@ class Engine:
     # ---------- verify ----------
     def verify(self, root):
         fwd = self.trace_forward(root)
+        if self.evidence is not None:  # no replay hook: classify exposed actions by evidence
+            from .mlflow_import import _norm
+            conf = [e for e in fwd["suspects"] if self.evidence in _norm(self.event[e]["payload"])]
+            return {**fwd, "confirmed": conf, "cleared": [e for e in fwd["suspects"] if e not in conf], "corrections": {}, "by": "evidence"}
         hidden = {root} | set(fwd["memories"])
         confirmed, cleared, corrections = [], [], {}
         for sid in fwd["sessions"]:
@@ -192,7 +209,7 @@ class Engine:
     # ---------- clean ----------
     def clean(self, verdict, apply=True):
         ts = 10 ** 9
-        reverted, conflicts, checklist, quarantined = [], [], [], []
+        reverted, conflicts, checklist, quarantined, already = [], [], [], [], []
         confirmed = set(verdict["confirmed"])
         for obj in [verdict["root"]] + [m for m in verdict["memories"]
                                         if any(self.event[e]["object_id"] == m for e in confirmed)]:
@@ -229,7 +246,10 @@ class Engine:
                 if before.get(field) == bad or target.get(field) == bad:
                     continue  # field not touched, or the clean replay would have written the same value
                 if current.get(field) != bad:
-                    conflicts.append({"event_id": eid, "row": e["row_key"], "field": field, "current": current.get(field)})
+                    if current.get(field) == target.get(field):
+                        already.append({"event_id": eid, "row": e["row_key"], "field": field, "value": current.get(field)})
+                    else:
+                        conflicts.append({"event_id": eid, "row": e["row_key"], "field": field, "current": current.get(field)})
                     continue
                 if field in target:
                     fixes[field] = target[field]
@@ -249,6 +269,7 @@ class Engine:
         if apply:
             self.s.commit()
         return {"quarantined": quarantined, "reverted": reverted, "conflicts": conflicts, "checklist": checklist,
+                "already_corrected": already,
                 "point_in_time_collateral": later_changes - infected_changes}
 
     # ---------- score ----------

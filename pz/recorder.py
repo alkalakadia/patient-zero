@@ -65,6 +65,27 @@ class Session:
             self._event(type="retrieve", object_id=r["object_id"], payload={"topics": topics})
         return rows
 
+    def read(self, object_id):
+        """Record that this session read one specific object. Returns False if it is hidden (replay) or quarantined."""
+        row = self.s.one("SELECT status FROM kb WHERE object_id=?", (object_id,))
+        if object_id in self.exclude or (row and row["status"] == "quarantined"):
+            return False
+        if object_id not in self.context:
+            self.context.append(object_id)
+            self._event(type="retrieve", object_id=object_id, payload={})
+        return True
+
+    def external_call(self, tool, key, payload, reversible=True, poisoned=None):
+        """An action in an outside system (GitHub, email...). Recorded, never applied to local tables."""
+        self.actions.append((tool, "external", key, dict(payload)))
+        if self.dry_run:
+            return None
+        eid = self._event(type="tool_call", object_id=key, tool=tool, table_name="external", row_key=key,
+                          reversible=int(reversible), payload=payload)
+        if poisoned is not None:
+            self.s.db.execute("INSERT INTO ground_truth VALUES (?,?)", (eid, int(poisoned)))
+        return eid
+
     # ---------- writes ----------
     def tool_call(self, tool, table, row_key, values, reversible=True, poisoned=None):
         self.actions.append((tool, table, row_key, dict(values)))

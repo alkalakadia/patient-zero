@@ -136,8 +136,12 @@ class Store:
         return cur.lastrowid
 
     # ---------- time travel (Delta-style reads as of a point in time) ----------
+    time_travel = None  # optional hook (Databricks): read items as of a timestamp with Delta time travel
+
     def table_as_of(self, table, ts):
         """Reconstruct every row of a business table as it was just before `ts`, from the change feed."""
+        if table == "items" and self.time_travel:
+            return self.time_travel(ts)
         rows = {}
         for c in self.q("SELECT row_key, after_json FROM row_changes WHERE table_name=? AND ts<? ORDER BY version", (table, ts)):
             if c["after_json"] is None:
