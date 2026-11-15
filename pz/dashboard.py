@@ -25,23 +25,51 @@ def _table(name, ds, cols, title, x, y, w=6, h=7):
             "position": {"x": x, "y": y, "width": w, "height": h}}
 
 
+def _bar(name, ds, title, x, y, w=6, h=6):
+    return {"widget": {"name": name, "queries": [{"name": "main_query", "query": {"datasetName": ds, "fields": [
+                {"name": "incident", "expression": "`incident`"}, {"name": "outcome", "expression": "`outcome`"},
+                {"name": "sum(actions)", "expression": "SUM(`actions`)"}], "disaggregated": False}}],
+                       "spec": {"version": 3, "widgetType": "bar", "encodings": {
+                           "x": {"fieldName": "incident", "scale": {"type": "categorical"}, "displayName": "Incident"},
+                           "y": {"fieldName": "sum(actions)", "scale": {"type": "quantitative"}, "displayName": "Agent actions"},
+                           "color": {"fieldName": "outcome", "scale": {"type": "categorical", "mappings": [
+                               {"value": "Caused by the attack", "color": "#A53F2B"}, {"value": "Left alone", "color": "#5F6B24"}]},
+                                     "displayName": "Outcome"}},
+                                "frame": {"showTitle": True, "title": title}}},
+            "position": {"x": x, "y": y, "width": w, "height": h}}
+
+
+LATEST = f"(SELECT run_id FROM {S}.incidents WHERE created_at IS NOT NULL ORDER BY created_at DESC LIMIT 1)"
+
+
 def spec():
+    label = "concat(coalesce(kind, 'payments'), ' · ', root, ' · ', run_id)"
     datasets = [
-        _ds("incidents", "Incidents", f"SELECT coalesce(kind, 'payments') AS kind, run_id, root, proven, cleared, rows_fixed, detail, created_at FROM {S}.incidents ORDER BY created_at DESC"),
-        _ds("totals", "Totals", f"SELECT count(*) AS incidents, coalesce(sum(proven),0) AS actions_proven, coalesce(sum(rows_fixed),0) AS rows_fixed FROM {S}.incidents"),
-        _ds("cdf", "Cleanup change feed", f"SELECT item_id, value, status, _change_type, _commit_version, _commit_timestamp FROM table_changes('{S}.payments', 1) "
-                                          "WHERE _change_type IN ('update_preimage','update_postimage') ORDER BY _commit_version DESC LIMIT 200"),
-        _ds("events", "Agent activity", f"SELECT run_id, agent_id, tool, count(*) AS actions FROM {S}.agent_events WHERE type='tool_call' GROUP BY ALL ORDER BY run_id, actions DESC"),
+        _ds("totals", "Totals", f"SELECT count(*) AS incidents, coalesce(sum(proven),0) AS caused, coalesce(sum(cleared),0) AS left_alone, "
+                                f"coalesce(sum(rows_fixed),0) AS undone FROM {S}.incidents"),
+        _ds("outcomes", "Caused vs left alone", f"SELECT {label} AS incident, 'Caused by the attack' AS outcome, proven AS actions FROM {S}.incidents "
+                                                f"UNION ALL SELECT {label}, 'Left alone', cleared FROM {S}.incidents"),
+        _ds("prs", "Latest incident: pull requests", f"SELECT title, url, array_join(unapproved_hosts, ', ') AS sends_data_to FROM {S}.pull_requests "
+                                                     f"WHERE run_id = {LATEST} ORDER BY title"),
+        _ds("notes", "Team notes", f"SELECT object_id AS note, source, status, run_id FROM {S}.team_memory ORDER BY run_id DESC, note"),
+        _ds("note_changes", "Team notes: change history", f"SELECT object_id AS note, run_id, _change_type AS change, status, _commit_version AS version, "
+                                                          f"_commit_timestamp AS changed_at FROM table_changes('{S}.team_memory', 1) "
+                                                          "WHERE _change_type IN ('update_preimage','update_postimage') ORDER BY _commit_version DESC, _change_type DESC"),
+        _ds("incidents", "Incidents", f"SELECT coalesce(kind, 'payments') AS kind, root AS patient_zero, proven AS caused, cleared AS left_alone, "
+                                      f"rows_fixed AS undone, created_at FROM {S}.incidents ORDER BY created_at DESC"),
     ]
     layout = [
-        {"widget": {"name": "title", "multilineTextboxSpec": {"lines": ["## Patient Zero\n", "Incident response for AI agents: what was poisoned, what it caused, what was undone."]}},
+        {"widget": {"name": "title", "multilineTextboxSpec": {"lines": ["## Patient Zero: agent incidents\n",
+                                                                        "What tricked the agents, what it caused, and what was undone. Everything here is read from the Delta tables Patient Zero writes."]}},
          "position": {"x": 0, "y": 0, "width": 6, "height": 2}},
         _counter("c1", "totals", "incidents", "Incidents", 0, 2),
-        _counter("c2", "totals", "actions_proven", "Agent actions proven caused by poison", 2, 2),
-        _counter("c3", "totals", "rows_fixed", "Changes undone (Delta rows + GitHub)", 4, 2),
-        _table("t1", "incidents", ["kind", "run_id", "root", "proven", "rows_fixed", "detail", "created_at"], "Incidents (payments and GitHub)", 0, 5),
-        _table("t2", "cdf", ["item_id", "value", "status", "_change_type", "_commit_version", "_commit_timestamp"], "Change Data Feed: payments", 0, 12),
-        _table("t3", "events", ["run_id", "agent_id", "tool", "actions"], "Agent activity by tool", 0, 19),
+        _counter("c2", "totals", "caused", "Actions caused by the attack", 2, 2),
+        _counter("c3", "totals", "left_alone", "Actions left alone", 4, 2),
+        _bar("b1", "outcomes", "Each incident: what the attack caused vs. what was left alone", 0, 5),
+        _table("t1", "prs", ["title", "url", "sends_data_to"], "Latest incident: pull requests that sent data out", 0, 11, h=5),
+        _table("t2", "notes", ["note", "source", "status", "run_id"], "Team notes (poisoned ones are quarantined)", 0, 16, w=3, h=6),
+        _table("t3", "note_changes", ["note", "change", "status", "version", "changed_at"], "Change Data Feed: team notes", 3, 16, w=3, h=6),
+        _table("t4", "incidents", ["kind", "patient_zero", "caused", "left_alone", "undone", "created_at"], "All incidents", 0, 22, h=6),
     ]
     return {"datasets": datasets, "pages": [{"name": "incident", "displayName": "Incident view", "layout": layout}]}
 
